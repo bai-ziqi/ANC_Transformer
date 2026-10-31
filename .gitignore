@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+checkpoints/*.pt
+wiener/*.pt
+results/
+data/NOISE/
+data/EXPECTED_NOISE/
+data/sh.npy
+.venv/

@@ -1,0 +1,59 @@
+# All relative paths are resolved from this file, not the shell working directory.
+seed: 2026
+path_id: 1
+sample_rate: 48000
+filter_length: 1967  # 1967 taps (mathematical FIR order = 1966)
+data_root: ../dataset_placeholder/dataset
+output_dir: results/path_01
+bank_file: wiener/wiener_bank.pt
+checkpoint_file: checkpoints/best.pt
+scene_names: [KTV, 公交, 厨房, 地铁, 步行街, 火车, 车载, 餐厅]
+
+split:
+  skip_seconds: 20.0
+  tail_margin_seconds: 1.0
+  fractions: [0.70, 0.15, 0.15]
+  gap_seconds: 2.0
+  # Both fit and ridge-calibration ranges are INSIDE the outer training split.
+  calibration_seconds: 5.0
+  calibration_gap_seconds: 2.0
+
+wiener:
+  fit_seconds_per_scene: 60.0
+  fit_segments: 3
+  ridge_ratios: [0.00000001, 0.0000001, 0.000001, 0.00001, 0.0001, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0]
+
+features:
+  observation_seconds: 0.5
+  n_fft: 1024
+  hop_length: 256
+  frequency_bins: 129
+  normalization_windows_per_scene: 16
+
+dataset:
+  control_seconds: 0.5
+  train_windows_per_scene: 128
+  validation_windows_per_scene: 16
+  test_windows_per_scene: 32
+
+model:
+  d_model: 64
+  nhead: 4
+  encoder_layers: 2
+  decoder_layers: 2
+  dim_feedforward: 128
+  dropout: 0.1
+
+training:
+  epochs: 30
+  batch_size: 16
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  filter_loss_weight: 0.1
+  num_workers: 0
+  device: auto
+
+metrics:
+  n_fft: 8192
+  hop_length: 2048
