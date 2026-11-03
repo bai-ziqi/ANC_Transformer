@@ -29,13 +29,45 @@ def verified_bundle(cfg):
     return bundle
 
 
-def losses(result, labels, bank, filter_weight):
+def acoustic_mse(result, batch, secondary):
+    """Differentiable mean squared error over the future control interval."""
+    reference = batch["reference"].to(result["filter"].device, dtype=torch.float64)
+    disturbance = batch["disturbance"].to(result["filter"].device, dtype=torch.float64)
+    coefficients = result["filter"].to(torch.float64)
+    context_value = batch["context"]
+    context = int(context_value if isinstance(context_value, int) else context_value[0])
+    outcome = simulate(reference, disturbance, coefficients, secondary, context)
+    return outcome["residual"].square().mean()
+
+
+def losses(result, labels, bank, cfg, batch, secondary):
     target = bank[labels]
     relative_mse = ((result["filter"] - target).square().sum(-1) /
                     target.square().sum(-1).clamp_min(1e-12)).mean()
-    classification = F.cross_entropy(result["logits"], labels)
-    return {"loss": classification + filter_weight * relative_mse,
-            "classification_loss": classification, "relative_filter_mse": relative_mse}
+    acoustic = acoustic_mse(result, batch, secondary)
+    mode = cfg["training"]["loss_mode"]
+    filter_weight = cfg["training"]["filter_loss_weight"]
+    acoustic_weight = cfg["training"]["acoustic_loss_weight"]
+    values = {"acoustic_mse": acoustic, "relative_filter_mse": relative_mse}
+    if mode in ("filter", "combined"):
+        values["weighted_filter_loss"] = filter_weight * relative_mse
+    if mode in ("acoustic", "combined"):
+        values["weighted_acoustic_loss"] = acoustic_weight * acoustic
+    if "logits" in result:
+        values["classification_loss"] = F.cross_entropy(result["logits"], labels)
+    values["loss"] = sum(value for key, value in values.items() if key.endswith("_loss"))
+    return values
+
+
+def prior_for(model, bank, labels, batch):
+    """Return one broadband prior for every sample; never pool priors."""
+    if getattr(model, "architecture", None) != "prior_adaptive":
+        return None
+    if "prior_filter" in batch:
+        return batch["prior_filter"]
+    # Compatibility bridge for the current 8-scene dataset: the row's scene
+    # selects its own broadband prior. The model itself has no 8-way assumption.
+    return bank[labels]
 
 
 def loader_for(cfg, bundle, split, shuffle=False):
@@ -48,15 +80,18 @@ def loader_for(cfg, bundle, split, shuffle=False):
 def load_model(cfg, checkpoint_file=None):
     bundle = verified_bundle(cfg)
     checkpoint = load_torch(checkpoint_file or cfg["checkpoint_file"])
+    if checkpoint.get("format_version") != 3:
+        raise ValueError("Checkpoint predates the acoustic-loss training protocol. Retrain it.")
     if checkpoint["bank_sha256"] != sha256(cfg["bank_file"]):
         raise ValueError("Checkpoint belongs to a different bank. Retrain using this bank.")
     saved = checkpoint["config"]
     if saved["model"] != cfg["model"] or saved["dataset"]["control_seconds"] != cfg["dataset"]["control_seconds"]:
         raise ValueError("Model or future-control protocol differs from training checkpoint.")
+    for key in ("loss_mode", "acoustic_loss_weight", "filter_loss_weight"):
+        if saved["training"].get(key) != cfg["training"].get(key):
+            raise ValueError(f"Training objective differs at {key}. Retrain the checkpoint.")
     model = ANCTransformer(cfg, bundle)
     model.load_state_dict(checkpoint["model_state"], strict=True)
-    if not torch.equal(model.filter_bank, bundle["filters"].float()):
-        raise ValueError("Checkpoint has modified bank coefficients.")
     return model.to(device_for(cfg["training"]["device"])).eval(), bundle, checkpoint
 
 
@@ -73,7 +108,8 @@ def evaluate(cfg, model, bundle, split, methods=("transformer",)):
     rows = []
     for batch in loader_for(cfg, bundle, split):
         labels = batch["scene_id"].to(device)
-        prediction = model(batch["observation"].to(device))
+        prior_filter = prior_for(model, bank, labels, batch)
+        prediction = model(batch["observation"].to(device), prior_filter=prior_filter)
         reference = batch["reference"].to(device)
         disturbance = batch["disturbance"].to(device)
         context = int(batch["context"][0])
@@ -90,13 +126,18 @@ def evaluate(cfg, model, bundle, split, methods=("transformer",)):
                 row = {"method": method, "scene": batch["scene_name"][i],
                        "observation_start": int(batch["observation_start"][i]),
                        "control_start": int(batch["control_start"][i]), "scored_samples": len(target[i]),
-                       "path_id": cfg["path_id"], **metrics}
-                if method == "transformer":
+                       "path_id": cfg["path_id"],
+                       "residual_mse": float(np.mean(residual[i] ** 2)),
+                       "disturbance_mse": float(np.mean(target[i] ** 2)), **metrics}
+                if method == "transformer" and "logits" in prediction:
                     row["correct_scene"] = int(prediction["logits"][i].argmax() == labels[i])
                     row["relative_filter_mse"] = float(((candidates[method][i] - bank[labels[i]]).square().sum() /
                                                         bank[labels[i]].square().sum().clamp_min(1e-12)).cpu())
                     for scene_id, name in enumerate(cfg["scene_names"]):
                         row[f"weight_{name}"] = float(prediction["weights"][i, scene_id].cpu())
+                elif method == "transformer":
+                    row["relative_filter_mse"] = float(((candidates[method][i] - bank[labels[i]]).square().sum() /
+                                                        bank[labels[i]].square().sum().clamp_min(1e-12)).cpu())
                 rows.append(row)
     return rows
 
@@ -112,12 +153,15 @@ def summarize(rows):
                 "mean_primary_nr_db": float(np.mean([v["primary_nr_db"] for v in values])),
                 "minimum_primary_nr_db": float(min(v["primary_nr_db"] for v in values)),
                 "mean_broadband_nr_db": float(np.mean([v["broadband_nr_db"] for v in values])),
+                "mean_residual_mse": float(np.mean([v["residual_mse"] for v in values])),
                 "mean_episode_maximum_rebound_db": float(np.mean([v["maximum_rebound_db"] for v in values])),
                 "maximum_rebound_db": float(max(v["maximum_rebound_db"] for v in values)),
                 "mean_positive_band_rebound_db": float(np.mean([v["mean_positive_band_rebound_db"] for v in values])),
                 "maximum_control_peak_abs": float(max(v["control_peak_abs"] for v in values))}
-        if method == "transformer":
+        if method == "transformer" and "correct_scene" in values[0]:
             item["scene_accuracy"] = float(np.mean([v["correct_scene"] for v in values]))
+            item["relative_filter_mse"] = float(np.mean([v["relative_filter_mse"] for v in values]))
+        elif method == "transformer":
             item["relative_filter_mse"] = float(np.mean([v["relative_filter_mse"] for v in values]))
         summaries.append(item)
     return summaries

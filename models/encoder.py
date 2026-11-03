@@ -1,21 +1,11 @@
-"""Reference waveform -> log-spectrum time sequence -> Transformer memory."""
+"""Reference waveform -> log-spectrum time tokens -> RoPE-encoded memory."""
 from __future__ import annotations
-
-import math
 
 import torch
 from torch import nn
 
 from data.preprocess import LogSpectrum
-
-
-def positional_encoding(length, width, device, dtype):
-    positions = torch.arange(length, device=device, dtype=dtype)[:, None]
-    scales = torch.exp(torch.arange(0, width, 2, device=device, dtype=dtype) * (-math.log(10000.0) / width))
-    encoding = torch.zeros(length, width, device=device, dtype=dtype)
-    encoding[:, 0::2] = torch.sin(positions * scales)
-    encoding[:, 1::2] = torch.cos(positions * scales[:width // 2])
-    return encoding
+from models.rope import RoPEEncoderLayer
 
 
 class NoiseEncoder(nn.Module):
@@ -26,15 +16,23 @@ class NoiseEncoder(nn.Module):
         self.register_buffer("feature_std", normalizer["std"].clone())
         width = model_cfg["d_model"]
         self.projection = nn.Linear(feature_cfg["frequency_bins"], width)
-        layer = nn.TransformerEncoderLayer(width, model_cfg["nhead"], model_cfg["dim_feedforward"],
-                                           model_cfg["dropout"], batch_first=True, norm_first=True)
-        self.encoder = nn.TransformerEncoder(layer, model_cfg["encoder_layers"],
-                                             norm=nn.LayerNorm(width), enable_nested_tensor=False)
+        self.encoder = nn.ModuleList([
+            RoPEEncoderLayer(
+                width,
+                model_cfg["nhead"],
+                model_cfg["dim_feedforward"],
+                model_cfg["dropout"],
+                model_cfg["rope_base"],
+            )
+            for _ in range(model_cfg["encoder_layers"])
+        ])
+        self.output_norm = nn.LayerNorm(width)
 
     def forward(self, reference_observation):
         features = (self.features(reference_observation) - self.feature_mean) / self.feature_std
         tokens = self.projection(features)
-        tokens = tokens + positional_encoding(tokens.shape[1], tokens.shape[2], tokens.device, tokens.dtype)
-        # Bidirectional attention is confined to the ALREADY OBSERVED window;
-        # the scored future interval never enters this encoder.
-        return self.encoder(tokens)
+        # Bidirectional RoPE attention is confined to the already observed
+        # window. No sinusoidal vector is added to the input embeddings.
+        for layer in self.encoder:
+            tokens = layer(tokens)
+        return self.output_norm(tokens)

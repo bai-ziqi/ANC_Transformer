@@ -1,8 +1,9 @@
-# 固定路径的八场景 Wiener Bank + Transformer ANC（第一版）
+# 固定路径的 Wiener 先验条件化 Transformer ANC
 
-固定一条已知次级路径；从参考噪声预测 8 个场景 Wiener FIR 的融合权重。
+固定一条已知次级路径；参考噪声 Encoder 产生 Query，每个样本自己的宽带
+Wiener FIR 产生 Key/Value，Decoder 输出适配当前观察窗口的完整 1967 tap FIR。
 默认 `path_id: 1`，可在 `config.yaml` 修改。保留 48 kHz、1967 个系数，
-不截断、不降采样、不做频带分解、不增加自由 FIR 残差、不在线更新 FxLMS。
+不截断、不降采样、不在线更新 FxLMS。
 严格说，1967 **taps/系数** 对应 FIR 数学阶数 1966。
 
 ## 数据与目录
@@ -44,33 +45,56 @@ test 不参与任何统计、拟合或选模。所有读取，包括卷积历史
 ```text
 过去 0.5 s 的参考噪声 x：[B,24000]
   → STFT(center=False) → log功率谱 → 每帧129维（频率轴池化，不改音频）
-  → 仅train估计的标准化 → Linear → 时间位置编码
-  → 2层 Transformer Encoder
-  → memory：[B,90,64]  （默认参数）
+  → 仅train估计的标准化 → Linear → 2层 RoPE Encoder
+  → Query memory：[B,90,64]  （默认参数）
 
-固定 Wiener Bank：[8,1967]，不参与梯度更新
-  → 共享缩放 + Linear(1967→64) + 场景身份Embedding
-  → 8个候选 Query：[B,8,64]
-  → 2层 Transformer Decoder：Q=候选，K/V=Encoder memory
-  → [B,8,64]
-  → 每token共享Linear(64→1) → [B,8] logits
-  → Softmax → alpha：[B,8]
-  → alpha @ 原始Wiener Bank → w_hat：[B,1967]
+每个样本对应的宽带 Wiener 先验 w_prior：[B,1967]
+  → rFFT(实部/虚部)
+  → 32 个有序频带 token → Linear(2→64)
+  → Key/Value：[B,32,64]
+
+Cross-Attention：Q=参考噪声时间 token，K/V=Wiener 频带 token
+  → 2层 prior-conditioned Decoder
+  → 时间 token 注意力池化 → [B,64]
+  → Filter Head 预测残差并加回先验 → w_hat：[B,1967]
 ```
 
-Decoder 含候选 token 的 self-attention 和单向 cross-attention，
-不是自回归文本解码，因此无三角因果 mask。Encoder 只能看到已观测窗口，
-不包含后续计分数据；不接收 d、路径标签以外的新环境信息或真实噪声类别。
-场景身份 embedding 标识每一个**候选**，不泄漏当前样本的真实场景。
-`scene_id` 仅用于监督和带场景标签的参照基线。
+RoPE 只旋转时间自注意力中的 Q/K，不修改 V，也不向 token embedding
+添加正弦位置向量。Decoder 定义 Q 来自参考噪声、K/V 来自 Wiener 频带表示，
+因此这里的交叉注意力方向与标准 Encoder–Decoder Transformer 相反。
 
-权重满足 alpha>=0、sum(alpha)=1，输出被限制在 8 个 Wiener FIR 的凸包内。
-这是选择/融合实验；不是无约束系数生成。第一版不输出 Delta w。
+`model.prior_mode: sample` 要求每条训练或推理记录提供自己的 1967 tap 先验，
+调用形式是 `model(observation, prior_filter=priors)`，其中 `priors` 可为
+`[taps]` 或 `[B,taps]`。模型内部没有 8 类固定 embedding，也不会跨样本平均
+或混合 Wiener 解；因此 batch 中有多少种噪声，就传入多少条各自的先验。
+
+当前 8 场景数据由 `scene_id` 找到该行对应的 bank 行，仅作为数据接口兼容桥；
+模型前向只接收已经解析好的逐样本 `prior_filter`。若扩展为多个噪声录音或
+多个训练样本，应由数据集为每条记录返回自己的 `prior_filter`。
+
+Wiener bank 只保留为当前数据的先验来源和评价基线；网络不读取整个 bank，也不把
+输出限制为 8 条 FIR 的凸组合。最终 head 可以预测任意 FIR 残差。
+
+设置 `model.architecture: legacy_bank_fusion` 可复现旧版“8 候选 Q + 声音 memory K/V
++ 凸组合”模型。不同架构的检查点不兼容，应重新训练。
+检查点格式还绑定训练目标和损失权重；FIR-loss 时代的旧检查点不能用于当前的
+声学残差实验，必须重新训练。
 
 ## 训练和物理评价
 
-训练损失为 CE + 0.1 × 相对 FIR 平方误差，后者用目标 FIR 能量归一化，
-避免不同场景系数量级直接主导误差。标签和目标 FIR 都来自 train 构建的 bank。
+默认训练损失直接是未来计分区间的声学残差均方：
+
+```text
+y = w_hat * x
+anti_noise = s * y
+e = d - anti_noise
+loss = mean(e²)
+```
+
+该损失保留完整的因果启动协议，可经 PyTorch 卷积和模型反向传播。`d`、`s`
+只用于训练目标和评价，不作为网络输入。相对 FIR 误差仍作为诊断指标记录，
+但默认不参与梯度。validation 按同一声学残差损失选择检查点。
+可通过 `training.loss_mode` 选择 `acoustic`、`filter` 或 `combined`。
 选模依据是外层 validation 的相同损失，另报告所选模型的声学验证指标。
 默认 30 epoch、batch 16、AdamW、小型 64 维 Transformer。
 
@@ -92,7 +116,8 @@ validation/test episode 不重叠；这是独立离线 episode，未实现连续
 
 1. `transformer`：根据过去 x 预测并融合 FIR。
 2. `scene_wiener`：给定真实场景标签，使用该场景的 train-only FIR。
-3. `pooled_wiener`：8类 train 统计汇总后**重新求解**的路径级 FIR。
+3. `pooled_wiener`：8类 train 统计汇总后**重新求解**的路径级基线，仅供对照；
+   它不会作为 Transformer 的默认输入。
 4. `mean_wiener`：8个场景 FIR 的简单算术平均。
 
 不直接使用旧资料包的路径级滤波器作主基线：旧拟合区间可能跨过新的外层划分。
@@ -155,7 +180,7 @@ python -m pytest tests -q
 ```
 
 测试覆盖 train-only bank 读取、时间隔离、Wiener 互相关方向、物理卷积/启动状态、
-已知增益的评分口径、冻结 bank/凸组合、完整训练-加载-四方法配对评估。
+已知增益的评分口径、RoPE/宽带先验频带 token、完整训练-加载-四方法配对评估。
 测试使用合成数据，保留真实的 48 kHz 和 1967 taps。
 
 快速复查本次贯通流程（使用已有 bank；仍只比较 validation）：

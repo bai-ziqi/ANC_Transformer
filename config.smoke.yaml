@@ -54,6 +54,10 @@ dataset:
   validation_windows_per_scene: 2
   test_windows_per_scene: 2
 model:
+  architecture: prior_adaptive
+  prior_mode: sample
+  prior_tokens: 32
+  rope_base: 10000.0
   d_model: 64
   nhead: 4
   encoder_layers: 2
@@ -66,7 +70,9 @@ training:
   learning_rate: 0.0003
   weight_decay: 0.0001
   gradient_clip: 1.0
-  filter_loss_weight: 0.1
+  loss_mode: acoustic
+  acoustic_loss_weight: 1.0
+  filter_loss_weight: 0.0
   num_workers: 0
   device: auto
 metrics:

@@ -1,11 +1,11 @@
-"""Train CE + relative FIR error. Selection uses outer validation loss ONLY."""
+"""Optimize acoustic residual energy; select on outer validation loss only."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import torch
 
-from experiments.common import evaluate, loader_for, losses, summarize, verified_bundle, write_csv
+from experiments.common import evaluate, loader_for, losses, prior_for, summarize, verified_bundle, write_csv
 from models.anc_transformer import ANCTransformer
 from utils import common_parser, device_for, dump_json, load_config, seed_everything, sha256
 
@@ -19,7 +19,8 @@ def train(cfg):
                                   weight_decay=cfg["training"]["weight_decay"])
     train_loader = loader_for(cfg, bundle, "train", shuffle=True)
     validation_loader = loader_for(cfg, bundle, "validation")
-    bank = model.filter_bank
+    bank = bundle["filters"].to(device).float()
+    secondary = bundle["secondary_path"].to(device)
     history, best = [], float("inf")
     destination = Path(cfg["checkpoint_file"])
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -30,13 +31,14 @@ def train(cfg):
         row = {"epoch": epoch}
         for split, loader in (("train", train_loader), ("validation", validation_loader)):
             model.train(split == "train")
-            totals = {"loss": 0.0, "classification_loss": 0.0, "relative_filter_mse": 0.0}
+            totals = {"loss": 0.0, "acoustic_mse": 0.0, "relative_filter_mse": 0.0}
             seen, correct = 0, 0
             with torch.set_grad_enabled(split == "train"):
                 for batch in loader:
                     labels = batch["scene_id"].to(device)
-                    prediction = model(batch["observation"].to(device))
-                    objective = losses(prediction, labels, bank, cfg["training"]["filter_loss_weight"])
+                    prior_filter = prior_for(model, bank, labels, batch)
+                    prediction = model(batch["observation"].to(device), prior_filter=prior_filter)
+                    objective = losses(prediction, labels, bank, cfg, batch, secondary)
                     if not torch.isfinite(objective["loss"]):
                         raise ValueError("Nonfinite training/validation loss.")
                     if split == "train":
@@ -46,22 +48,26 @@ def train(cfg):
                         optimizer.step()
                     size = len(labels)
                     seen += size
-                    correct += int((prediction["logits"].argmax(-1) == labels).sum())
+                    if "logits" in prediction:
+                        correct += int((prediction["logits"].argmax(-1) == labels).sum())
                     for key, value in objective.items():
-                        totals[key] += float(value.detach()) * size
+                        totals[key] = totals.get(key, 0.0) + float(value.detach()) * size
             for key, value in totals.items():
                 row[f"{split}_{key}"] = value / seen
-            row[f"{split}_accuracy"] = correct / seen
+            if "logits" in prediction:
+                row[f"{split}_accuracy"] = correct / seen
         history.append(row)
         if row["validation_loss"] < best:
             best = row["validation_loss"]
-            torch.save({"format_version": 1, "epoch": epoch, "validation_loss": best,
-                        "selection_metric": "minimum outer validation CE + relative FIR MSE",
+            metric_name = f"minimum outer validation {cfg['training']['loss_mode']} loss"
+            torch.save({"format_version": 3, "epoch": epoch, "validation_loss": best,
+                        "selection_metric": metric_name,
                         "config": cfg, "bank_sha256": bank_digest,
                         "model_state": model.state_dict(), "trainable_parameters": parameters}, destination)
         dump_json(Path(cfg["output_dir"]) / "training_history.json", history)
-        print(f"epoch={epoch:03d} train={row['train_loss']:.4f} val={row['validation_loss']:.4f} "
-              f"val_accuracy={row['validation_accuracy']:.3f}", flush=True)
+        extra = (f" val_accuracy={row['validation_accuracy']:.3f}"
+                 if "validation_accuracy" in row else "")
+        print(f"epoch={epoch:03d} train={row['train_loss']:.4f} val={row['validation_loss']:.4f}{extra}", flush=True)
     # Report acoustic validation for the selected checkpoint; TEST is untouched.
     from utils import load_torch
     selected = load_torch(destination)

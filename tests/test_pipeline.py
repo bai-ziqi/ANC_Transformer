@@ -15,9 +15,10 @@ from anc.anc_simulator import simulate, simulate_numpy
 from anc.metrics import power_spectrum, score_signals
 from data.dataset import ANCWindows
 from data.inspect_data import inspect, read_mono
-from experiments.common import evaluate, load_model, verified_bundle
+from experiments.common import evaluate, load_model, losses, verified_bundle
 from experiments.train import train
 from models.anc_transformer import ANCTransformer
+from models.rope import apply_rope
 from utils import DEFAULT_CONFIG, load_config
 from wiener.build_bank import build_bank
 from wiener.calculate_wiener import energy_diagnostics, solve_candidates, statistic_vectors
@@ -91,6 +92,23 @@ def test_causal_simulation_does_not_invent_past_actuator_state():
     assert numpy_result["anti_noise"][0] == pytest.approx(y[context])
 
 
+def test_acoustic_loss_is_the_future_residual_mean_square():
+    generator = torch.Generator().manual_seed(11)
+    reference = torch.randn(2, 16, generator=generator, dtype=torch.float64)
+    disturbance = torch.randn(2, 16, generator=generator, dtype=torch.float64)
+    secondary = torch.tensor([0.7, -0.2, 0.05], dtype=torch.float64)
+    coefficients = torch.randn(2, 4, generator=generator, requires_grad=True)
+    result = {"filter": coefficients}
+    batch = {"reference": reference, "disturbance": disturbance, "context": 2}
+    cfg = {"training": {"loss_mode": "acoustic", "acoustic_loss_weight": 1.0,
+                         "filter_loss_weight": 0.0}}
+    objective = losses(result, torch.zeros(2, dtype=torch.long), torch.zeros(8, 4), cfg, batch, secondary)
+    expected = simulate(reference, disturbance, coefficients, secondary, 2)["residual"].square().mean()
+    torch.testing.assert_close(objective["loss"], expected)
+    objective["loss"].backward()
+    assert coefficients.grad is not None and torch.isfinite(coefficients.grad).all()
+
+
 def test_metric_known_gain_and_band_rebound():
     x = np.random.default_rng(3).normal(size=24000)
     metrics = score_signals(x, x * 0.5, x * 0)
@@ -114,6 +132,18 @@ def test_spectrum_matches_original_torch_scoring_convention():
     expected = spectrum.abs().square().mean(-1) / window.square().sum()
     expected[1:-1] *= 2
     np.testing.assert_allclose(power_spectrum(x, n_fft, hop), expected.numpy(), rtol=1e-12, atol=1e-12)
+
+
+def test_rope_preserves_norm_and_depends_on_temporal_position():
+    query = torch.randn(2, 4, 7, 8)
+    rotated = apply_rope(query)
+    torch.testing.assert_close(rotated.square().sum(-1), query.square().sum(-1))
+    torch.testing.assert_close(rotated[:, :, 0], query[:, :, 0])  # position zero is identity
+    assert not torch.allclose(rotated[:, :, 1], query[:, :, 1])
+
+    repeated = query[:, :, :1].expand(-1, -1, 7, -1)
+    positioned = apply_rope(repeated)
+    assert not torch.allclose(positioned[:, :, 0], positioned[:, :, 1])
 
 
 def test_splits_reads_and_bank_are_train_only(tiny_config, monkeypatch):
@@ -149,20 +179,33 @@ def test_splits_reads_and_bank_are_train_only(tiny_config, monkeypatch):
             assert start + ds.observation + ds.score <= record["split_end"]
 
 
-def test_end_to_end_model_is_convex_bank_frozen_and_comparison_is_paired(tiny_config):
+def test_end_to_end_model_is_prior_conditioned_and_comparison_is_paired(tiny_config):
     cfg = tiny_config
     bundle = build_bank(cfg)
     model = ANCTransformer(cfg, bundle)
     batch = torch.randn(2, 4800)
-    output = model(batch)
+    sample_priors = bundle["filters"][:2].float()
+    output = model(batch, prior_filter=sample_priors)
     assert output["filter"].shape == (2, 1967)
-    assert output["weights"].shape == (2, 8)
-    torch.testing.assert_close(output["weights"].sum(-1), torch.ones(2))
-    assert output["weights"].min() >= 0
-    torch.testing.assert_close(output["filter"], output["weights"] @ model.filter_bank)
-    assert "filter_bank" not in dict(model.named_parameters())
-    (-output["logits"][:, 0].mean()).backward()
-    assert model.decoder.scene_embedding.weight.grad.abs().sum() > 0
+    expected_frames = 17  # 0.1 s, 512 FFT, 256 hop, center=False
+    assert output["pool_weights"].shape == (2, expected_frames)
+    torch.testing.assert_close(output["pool_weights"].sum(-1), torch.ones(2))
+    assert output["pool_weights"].min() >= 0
+    assert output["prior_filter"].shape == (2, 1967)
+    # The single prior is frequency-tokenized; RoPE is internal to Q/K and
+    # no sinusoidal position vector is added to the input embeddings.
+    prior_tokens = model.decoder.prior_tokenizer(output["prior_filter"])
+    assert prior_tokens.shape == (2, cfg["model"]["prior_tokens"], cfg["model"]["d_model"])
+    assert hasattr(model.encoder.encoder[0], "attention")
+    assert not hasattr(model, "filter_bank")
+    output["pool_weights"].square().sum().backward()
+    assert model.decoder.layers[0].cross_attention.query.weight.grad.abs().sum() > 0
+    with torch.no_grad():
+        model.filter_head.residual[-1].weight.normal_(0, 0.0001)
+    explicit_prior = bundle["filters"][0].float()[None].expand(2, -1)
+    conditioned = model(batch, prior_filter=explicit_prior)
+    torch.testing.assert_close(conditioned["prior_filter"], explicit_prior)
+    assert not torch.allclose(conditioned["filter"][0], conditioned["filter"][1])
     checkpoint = train(cfg)
     assert checkpoint["epoch"] == 1
     selected, loaded_bundle, _ = load_model(cfg)

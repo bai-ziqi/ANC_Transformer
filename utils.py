@@ -52,14 +52,33 @@ def load_config(path=DEFAULT_CONFIG):
         raise ValueError("Model dimensions/layer counts must be positive.")
     if cfg["model"]["d_model"] % cfg["model"]["nhead"]:
         raise ValueError("d_model must be divisible by nhead.")
+    architecture = cfg["model"].get("architecture")
+    if architecture not in ("prior_adaptive", "legacy_bank_fusion"):
+        raise ValueError("model.architecture must be prior_adaptive or legacy_bank_fusion.")
+    if architecture == "prior_adaptive":
+        if cfg["model"].get("prior_mode") != "sample":
+            raise ValueError("model.prior_mode must be sample; priors are never pooled.")
+        if cfg["model"].get("prior_tokens", 0) <= 0:
+            raise ValueError("model.prior_tokens must be positive.")
+        if cfg["model"].get("rope_base", 0) <= 1:
+            raise ValueError("model.rope_base must be greater than one.")
+        head_width = cfg["model"]["d_model"] // cfg["model"]["nhead"]
+        if head_width % 2:
+            raise ValueError("RoPE requires an even width per attention head.")
     if not 0 <= cfg["model"]["dropout"] < 1:
         raise ValueError("dropout must be in [0,1).")
     if cfg["training"]["epochs"] <= 0 or cfg["training"]["batch_size"] <= 0:
         raise ValueError("epochs and batch_size must be positive.")
     if cfg["training"]["learning_rate"] <= 0 or cfg["training"]["gradient_clip"] <= 0:
         raise ValueError("learning_rate and gradient_clip must be positive.")
-    if cfg["training"]["filter_loss_weight"] < 0 or cfg["training"]["num_workers"] < 0:
-        raise ValueError("filter loss weight and num_workers cannot be negative.")
+    if cfg["training"].get("loss_mode") not in ("acoustic", "filter", "combined"):
+        raise ValueError("training.loss_mode must be acoustic, filter, or combined.")
+    if cfg["training"].get("filter_loss_weight", -1) < 0:
+        raise ValueError("training.filter_loss_weight cannot be negative.")
+    if cfg["training"].get("acoustic_loss_weight", -1) < 0:
+        raise ValueError("training.acoustic_loss_weight cannot be negative.")
+    if cfg["training"]["num_workers"] < 0:
+        raise ValueError("training.num_workers cannot be negative.")
     if not 0 < cfg["features"]["hop_length"] <= cfg["features"]["n_fft"]:
         raise ValueError("Feature hop must be in 1..n_fft.")
     if not 0 < cfg["features"]["frequency_bins"] <= cfg["features"]["n_fft"] // 2 + 1:
