@@ -21,12 +21,17 @@ def read_mono(path, start, frames):
     return value
 
 
-def load_secondary(cfg):
+def load_secondary_paths(cfg):
     paths = np.load(Path(cfg["data_root"]) / "sh.npy", allow_pickle=False)
     if paths.shape == (1967, 10):
         paths = paths.T
     if paths.shape != (10, 1967) or not np.all(np.isfinite(paths)):
         raise ValueError(f"Expected 10 x 1967 finite secondary paths; got {paths.shape}.")
+    return np.asarray(paths, dtype=np.float64)
+
+
+def load_secondary(cfg):
+    paths = load_secondary_paths(cfg)
     selected = np.asarray(paths[cfg["path_id"] - 1], dtype=np.float64)
     if np.dot(selected, selected) <= 0:
         raise ValueError("Selected secondary path is all zero.")
@@ -88,13 +93,21 @@ def inspect(cfg):
 def main():
     args = common_parser(__doc__).parse_args()
     cfg = load_config(args.config)
-    manifest = inspect(cfg)
+    if cfg.get("protocol", {}).get("mode") == "cross_path":
+        from data.cross_path import inspect_cross_path
+        manifest = inspect_cross_path(cfg)
+    else:
+        manifest = inspect(cfg)
     destination = Path(cfg["output_dir"]) / "data_manifest.json"
     dump_json(destination, manifest)
     for scene in manifest["scenes"]:
         seconds = scene["frames"] / cfg["sample_rate"]
         print(f"{scene['name']}: {seconds:.3f} s; {scene['ranges']}")
-    print(f"Validated 8 scene pairs and path {cfg['path_id']}. Manifest: {destination}")
+    if manifest.get("protocol_mode") == "cross_path":
+        print(f"Validated {len(manifest['scenes'])} scenes x {len(manifest['path_ids'])} paths. "
+              f"Manifest: {destination}")
+    else:
+        print(f"Validated 8 scene pairs and path {cfg['path_id']}. Manifest: {destination}")
 
 
 if __name__ == "__main__":

@@ -13,9 +13,10 @@ from scipy.signal import lfilter
 
 from anc.anc_simulator import simulate, simulate_numpy
 from anc.metrics import power_spectrum, score_signals
+from data.cross_path import CrossPathWindows
 from data.dataset import ANCWindows
 from data.inspect_data import inspect, read_mono
-from experiments.common import evaluate, load_model, losses, verified_bundle
+from experiments.common import evaluate, load_model, losses, save_evaluation, verified_bundle
 from experiments.train import train
 from models.anc_transformer import ANCTransformer
 from models.rope import apply_rope
@@ -40,23 +41,33 @@ def tiny_config(tmp_path):
     cfg["dataset"].update(control_seconds=0.1, train_windows_per_scene=1,
                            validation_windows_per_scene=1, test_windows_per_scene=1)
     cfg["model"].update(d_model=8, nhead=2, encoder_layers=1, decoder_layers=1,
-                         dim_feedforward=16, dropout=0.0)
+                         dim_feedforward=16, dropout=0.0, filter_output_mode="direct")
     cfg["training"].update(epochs=1, batch_size=8, device="cpu")
     cfg["metrics"].update(n_fft=8192, hop_length=2048)
+    cfg["protocol"] = {
+        "mode": "cross_path",
+        "train_paths": [1, 2],
+        "validation_paths": [3],
+        "test_paths": [4],
+        "prior_source": "same_path_train_only",
+    }
     root = Path(cfg["data_root"])
     (root / "NOISE").mkdir(parents=True)
     (root / "EXPECTED_NOISE").mkdir()
     rng = np.random.default_rng(7)
     secondary = np.zeros((1967, 10))
-    secondary[0] = 1.0
-    secondary[20] = 0.05
+    for path_id in range(1, 5):
+        secondary[0, path_id - 1] = 1.0
+        secondary[20, path_id - 1] = 0.02 * path_id
     np.save(root / "sh.npy", secondary)
     for i, name in enumerate(cfg["scene_names"]):
         x = rng.normal(0, 0.05, 6 * 48000)
         x = lfilter([1], [1, -0.08 * i], x)
-        d = lfilter([0.4 + 0.02 * i, 0.1], [1], x)
         sf.write(root / "NOISE" / f"{name}.wav", x, 48000, subtype="FLOAT")
-        sf.write(root / "EXPECTED_NOISE" / f"{name}_scene_01.wav", d, 48000, subtype="FLOAT")
+        for path_id in range(1, 5):
+            d = lfilter([0.35 + 0.02 * i + 0.03 * path_id, 0.1], [1], x)
+            sf.write(root / "EXPECTED_NOISE" / f"{name}_scene_{path_id:02d}.wav",
+                     d, 48000, subtype="FLOAT")
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
     return load_config(path)
@@ -98,11 +109,12 @@ def test_acoustic_loss_is_the_future_residual_mean_square():
     disturbance = torch.randn(2, 16, generator=generator, dtype=torch.float64)
     secondary = torch.tensor([0.7, -0.2, 0.05], dtype=torch.float64)
     coefficients = torch.randn(2, 4, generator=generator, requires_grad=True)
-    result = {"filter": coefficients}
+    prior = torch.zeros(2, 4, dtype=torch.float64)
+    result = {"filter": coefficients, "prior_filter": prior}
     batch = {"reference": reference, "disturbance": disturbance, "context": 2}
     cfg = {"training": {"loss_mode": "acoustic", "acoustic_loss_weight": 1.0,
                          "filter_loss_weight": 0.0}}
-    objective = losses(result, torch.zeros(2, dtype=torch.long), torch.zeros(8, 4), cfg, batch, secondary)
+    objective = losses(result, cfg, batch, secondary)
     expected = simulate(reference, disturbance, coefficients, secondary, 2)["residual"].square().mean()
     torch.testing.assert_close(objective["loss"], expected)
     objective["loss"].backward()
@@ -147,7 +159,8 @@ def test_rope_preserves_norm_and_depends_on_temporal_position():
 
 
 def test_splits_reads_and_bank_are_train_only(tiny_config, monkeypatch):
-    cfg = tiny_config
+    cfg = copy.deepcopy(tiny_config)
+    cfg.pop("protocol", None)
     manifest = inspect(cfg)
     allowed = {}
     for scene in manifest["scenes"]:
@@ -184,7 +197,20 @@ def test_end_to_end_model_is_prior_conditioned_and_comparison_is_paired(tiny_con
     bundle = build_bank(cfg)
     model = ANCTransformer(cfg, bundle)
     batch = torch.randn(2, 4800)
-    sample_priors = bundle["filters"][:2].float()
+    assert bundle["format_version"] == 2
+    assert bundle["filters"].shape == (8, 4, 1967)
+    expected_paths = {"train": {1, 2}, "validation": {3}, "test": {4}}
+    for split, path_ids in expected_paths.items():
+        dataset = CrossPathWindows(
+            cfg, bundle["manifest"], split,
+            bundle["filters"], bundle["secondary_paths"],
+        )
+        assert {record["path_id"] for record in dataset.records} == path_ids
+        item = dataset[0]
+        bank_index = bundle["path_ids"].index(item["path_id"])
+        torch.testing.assert_close(item["prior_filter"], bundle["filters"][item["scene_id"], bank_index].float())
+        torch.testing.assert_close(item["secondary_path"], bundle["secondary_paths"][bank_index].double())
+    sample_priors = bundle["filters"][:2, 0].float()
     output = model(batch, prior_filter=sample_priors)
     assert output["filter"].shape == (2, 1967)
     expected_frames = 17  # 0.1 s, 512 FFT, 256 hop, center=False
@@ -200,23 +226,27 @@ def test_end_to_end_model_is_prior_conditioned_and_comparison_is_paired(tiny_con
     assert not hasattr(model, "filter_bank")
     output["pool_weights"].square().sum().backward()
     assert model.decoder.layers[0].cross_attention.query.weight.grad.abs().sum() > 0
-    with torch.no_grad():
-        model.filter_head.residual[-1].weight.normal_(0, 0.0001)
-    explicit_prior = bundle["filters"][0].float()[None].expand(2, -1)
+    explicit_prior = bundle["filters"][0, 0].float()[None].expand(2, -1)
     conditioned = model(batch, prior_filter=explicit_prior)
     torch.testing.assert_close(conditioned["prior_filter"], explicit_prior)
     assert not torch.allclose(conditioned["filter"][0], conditioned["filter"][1])
+    assert model.filter_head.output_mode == "direct"
+    assert not hasattr(model.filter_head, "residual")
     checkpoint = train(cfg)
     assert checkpoint["epoch"] == 1
     selected, loaded_bundle, _ = load_model(cfg)
     rows = evaluate(cfg, selected, loaded_bundle, "test",
                     ("transformer", "scene_wiener", "pooled_wiener", "mean_wiener"))
     assert len(rows) == 32
+    summary = save_evaluation(cfg, rows, "test", "cross_path_test", checkpoint)
+    assert any(item["scene"] == "ALL" and item["path_id"] == "ALL" for item in summary)
+    assert any(item["scene"] == "ALL" and item["path_id"] == 4 for item in summary)
     for name in cfg["scene_names"]:
         scene_rows = [r for r in rows if r["scene"] == name]
         assert len({(r["observation_start"], r["control_start"], r["scored_samples"]) for r in scene_rows}) == 1
     changed = copy.deepcopy(cfg)
-    changed["path_id"] = 2
+    changed = copy.deepcopy(cfg)
+    changed["protocol"]["test_paths"] = [3]
     with pytest.raises(ValueError, match="Bank configuration changed"):
         verified_bundle(changed)
 

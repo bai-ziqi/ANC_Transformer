@@ -1,9 +1,10 @@
-# 固定路径的 Wiener 先验条件化 Transformer ANC
+# 跨路径 Wiener 先验条件化 Transformer ANC
 
-固定一条已知次级路径；参考噪声 Encoder 产生 Query，每个样本自己的宽带
-Wiener FIR 产生 Key/Value，Decoder 输出适配当前观察窗口的完整 1967 tap FIR。
-默认 `path_id: 1`，可在 `config.yaml` 修改。保留 48 kHz、1967 个系数，
-不截断、不降采样、不在线更新 FxLMS。
+当前默认实验使用路径 1–7 训练、路径 8–9 验证、路径 10 测试。参考噪声 Encoder
+产生 Query，每个样本自己的场景/路径宽带 Wiener FIR 产生 Key/Value，Decoder
+直接生成适配当前观察窗口的完整 1967 tap FIR。详细协议、样本数和解释边界见
+[CROSS_PATH_EXPERIMENT.md](CROSS_PATH_EXPERIMENT.md)。保留 48 kHz、1967 个系数，
+不截断、不降采样、不在线更新 FxLMS。`config.yaml` 保留为单路径对照实验入口。
 严格说，1967 **taps/系数** 对应 FIR 数学阶数 1966。
 
 ## 数据与目录
@@ -15,7 +16,7 @@ Wiener FIR 产生 Key/Value，Decoder 输出适配当前观察窗口的完整 19
 只需把 `data_root` 改为 `data`。所有配置相对路径以 YAML 所在目录为基准。
 
 - `NOISE/<scene>.wav`：参考信号 x。
-- `EXPECTED_NOISE/<scene>_scene_01.wav`：固定路径的目标扰动 d。
+- `EXPECTED_NOISE/<scene>_scene_<path>.wav`：目标扰动 d，路径编号为 01–10。
 - `sh.npy`：形状 `[1967,10]` 或 `[10,1967]`，选出指定的 s。
 - 八类名称和 bank/标签/token 顺序统一以 `scene_names` 为准。
 
@@ -56,7 +57,7 @@ test 不参与任何统计、拟合或选模。所有读取，包括卷积历史
 Cross-Attention：Q=参考噪声时间 token，K/V=Wiener 频带 token
   → 2层 prior-conditioned Decoder
   → 时间 token 注意力池化 → [B,64]
-  → Filter Head 预测残差并加回先验 → w_hat：[B,1967]
+  → Filter Head 直接生成完整归一化 FIR，再按先验 RMS 定标 → w_hat：[B,1967]
 ```
 
 RoPE 只旋转时间自注意力中的 Q/K，不修改 V，也不向 token embedding
@@ -73,7 +74,7 @@ RoPE 只旋转时间自注意力中的 Q/K，不修改 V，也不向 token embed
 多个训练样本，应由数据集为每条记录返回自己的 `prior_filter`。
 
 Wiener bank 只保留为当前数据的先验来源和评价基线；网络不读取整个 bank，也不把
-输出限制为 8 条 FIR 的凸组合。最终 head 可以预测任意 FIR 残差。
+输出限制为 8 条 FIR 的凸组合。最终 head 直接生成完整 FIR，不采用 `先验 + 残差`。
 
 设置 `model.architecture: legacy_bank_fusion` 可复现旧版“8 候选 Q + 声音 memory K/V
 + 凸组合”模型。不同架构的检查点不兼容，应重新训练。
@@ -125,7 +126,7 @@ validation/test episode 不重叠；这是独立离线 episode，未实现连续
 评价保持原项目的口径：50–5000 Hz 三分之一倍频程等权平均 NR、宽带 NR、
 1–8 kHz 最大反弹、平均正反弹、控制 RMS/峰值与能量比。
 
-固定路径下，若系统近似 LTI 且最优逆滤波器可表示，不同噪声的最优 FIR 可能非常相近。
+跨路径实验中，若系统近似 LTI 且最优逆滤波器可表示，不同噪声的最优 FIR 可能非常相近。
 先检查 `wiener_diagnostics.json` 的余弦相似度和内部train跨场景性能矩阵，
 再判断场景适应是否有收益；不预设 Transformer 必定优于汇总 Wiener。
 同时输出每个 FIR 达到 95%/99% 累计能量所需 taps，第一版保持完整长度。
@@ -143,9 +144,10 @@ cd F:\比赛\expert_training_ppt_materials\ANC_Transformer
 $ancPython = "..\.venv-anc\Scripts\python.exe"
 $env:OMP_NUM_THREADS = "2"
 $env:MKL_NUM_THREADS = "2"
-& $ancPython -m data.inspect_data --config config.yaml
-& $ancPython -m experiments.train --config config.yaml
-& $ancPython -m experiments.compare --config config.yaml
+& $ancPython -m data.inspect_data --config config.cross_path.yaml
+& $ancPython -m wiener.build_bank --config config.cross_path.yaml
+& $ancPython -m experiments.train --config config.cross_path.yaml
+& $ancPython -m experiments.compare --config config.cross_path.yaml --split validation
 ```
 
 当前已用正式配置生成 `wiener/wiener_bank.pt`。`checkpoints/smoke.pt` 来自
@@ -156,11 +158,11 @@ $env:MKL_NUM_THREADS = "2"
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m data.inspect_data --config config.yaml
-python -m wiener.build_bank --config config.yaml
-python -m experiments.train --config config.yaml
-# 完成选模后运行一次完整对照；该命令同时测试四种方法。
-python -m experiments.compare --config config.yaml
+python -m data.inspect_data --config config.cross_path.yaml
+python -m wiener.build_bank --config config.cross_path.yaml
+python -m experiments.train --config config.cross_path.yaml
+# 验证集用于选模和调参；冻结方案后才运行 test。
+python -m experiments.compare --config config.cross_path.yaml --split validation
 ```
 
 `python -m experiments.test` 可单独测试 Transformer；与 compare 使用相同 protocol。
@@ -186,8 +188,8 @@ python -m pytest tests -q
 快速复查本次贯通流程（使用已有 bank；仍只比较 validation）：
 
 ```powershell
-& $ancPython -m experiments.train --config config.smoke.yaml
-& $ancPython -m experiments.compare --config config.smoke.yaml --split validation
+& $ancPython -m experiments.train --config config.cross_path.smoke.yaml
+& $ancPython -m experiments.compare --config config.cross_path.smoke.yaml --split validation
 & $ancPython -m pytest tests -q
 ```
 

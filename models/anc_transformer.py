@@ -17,7 +17,11 @@ class ANCTransformer(nn.Module):
         if self.architecture == "prior_adaptive":
             self.encoder = NoiseEncoder(cfg["features"], cfg["model"], bundle["normalizer"])
             self.decoder = WienerDecoder(cfg["filter_length"], cfg["model"])
-            self.filter_head = FilterHead(cfg["model"]["d_model"], cfg["filter_length"])
+            self.filter_head = FilterHead(
+                cfg["model"]["d_model"],
+                cfg["filter_length"],
+                cfg["model"].get("filter_output_mode", "direct"),
+            )
         elif self.architecture == "legacy_bank_fusion":
             self.register_buffer("filter_bank", bundle["filters"].float().clone())
             self.encoder = LegacyEncoder(cfg["features"], cfg["model"], bundle["normalizer"])

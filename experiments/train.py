@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from experiments.common import evaluate, loader_for, losses, prior_for, summarize, verified_bundle, write_csv
+from experiments.common import evaluate, loader_for, losses, prior_for, save_evaluation, verified_bundle
 from models.anc_transformer import ANCTransformer
 from utils import common_parser, device_for, dump_json, load_config, seed_everything, sha256
 
@@ -19,8 +19,7 @@ def train(cfg):
                                   weight_decay=cfg["training"]["weight_decay"])
     train_loader = loader_for(cfg, bundle, "train", shuffle=True)
     validation_loader = loader_for(cfg, bundle, "validation")
-    bank = bundle["filters"].to(device).float()
-    secondary = bundle["secondary_path"].to(device)
+    prior_bank = bundle["filters"].to(device).float()
     history, best = [], float("inf")
     destination = Path(cfg["checkpoint_file"])
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -36,9 +35,9 @@ def train(cfg):
             with torch.set_grad_enabled(split == "train"):
                 for batch in loader:
                     labels = batch["scene_id"].to(device)
-                    prior_filter = prior_for(model, bank, labels, batch)
+                    prior_filter = prior_for(model, prior_bank, labels, batch)
                     prediction = model(batch["observation"].to(device), prior_filter=prior_filter)
-                    objective = losses(prediction, labels, bank, cfg, batch, secondary)
+                    objective = losses(prediction, cfg, batch)
                     if not torch.isfinite(objective["loss"]):
                         raise ValueError("Nonfinite training/validation loss.")
                     if split == "train":
@@ -60,21 +59,20 @@ def train(cfg):
         if row["validation_loss"] < best:
             best = row["validation_loss"]
             metric_name = f"minimum outer validation {cfg['training']['loss_mode']} loss"
-            torch.save({"format_version": 3, "epoch": epoch, "validation_loss": best,
+            torch.save({"format_version": 4, "epoch": epoch, "validation_loss": best,
                         "selection_metric": metric_name,
                         "config": cfg, "bank_sha256": bank_digest,
                         "model_state": model.state_dict(), "trainable_parameters": parameters}, destination)
         dump_json(Path(cfg["output_dir"]) / "training_history.json", history)
         extra = (f" val_accuracy={row['validation_accuracy']:.3f}"
                  if "validation_accuracy" in row else "")
-        print(f"epoch={epoch:03d} train={row['train_loss']:.4f} val={row['validation_loss']:.4f}{extra}", flush=True)
+        print(f"epoch={epoch:03d} train={row['train_loss']:.6e} val={row['validation_loss']:.6e}{extra}", flush=True)
     # Report acoustic validation for the selected checkpoint; TEST is untouched.
     from utils import load_torch
     selected = load_torch(destination)
     model.load_state_dict(selected["model_state"])
     validation_rows = evaluate(cfg, model, bundle, "validation")
-    write_csv(Path(cfg["output_dir"]) / "selected_validation_episodes.csv", validation_rows)
-    dump_json(Path(cfg["output_dir"]) / "selected_validation_summary.json", summarize(validation_rows))
+    save_evaluation(cfg, validation_rows, "validation", "selected", selected)
     print(f"Selected epoch {selected['epoch']}; checkpoint: {destination}", flush=True)
     return selected
 

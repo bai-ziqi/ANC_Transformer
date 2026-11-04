@@ -13,7 +13,7 @@ import torch
 import yaml
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.yaml")
+DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.cross_path.yaml")
 
 
 def load_config(path=DEFAULT_CONFIG):
@@ -65,6 +65,9 @@ def load_config(path=DEFAULT_CONFIG):
         head_width = cfg["model"]["d_model"] // cfg["model"]["nhead"]
         if head_width % 2:
             raise ValueError("RoPE requires an even width per attention head.")
+        cfg["model"].setdefault("filter_output_mode", "direct")
+        if cfg["model"]["filter_output_mode"] not in ("direct", "residual"):
+            raise ValueError("model.filter_output_mode must be direct or residual.")
     if not 0 <= cfg["model"]["dropout"] < 1:
         raise ValueError("dropout must be in [0,1).")
     if cfg["training"]["epochs"] <= 0 or cfg["training"]["batch_size"] <= 0:
@@ -88,6 +91,24 @@ def load_config(path=DEFAULT_CONFIG):
     ridges = cfg["wiener"]["ridge_ratios"]
     if not ridges or any(not np.isfinite(v) or v < 0 for v in ridges):
         raise ValueError("ridge_ratios must be finite and nonnegative.")
+    protocol = cfg.get("protocol")
+    if protocol is not None:
+        if protocol.get("mode") != "cross_path":
+            raise ValueError("protocol.mode must be cross_path when protocol is set.")
+        groups = {}
+        for split in ("train", "validation", "test"):
+            values = protocol.get(f"{split}_paths")
+            if not values or any(not isinstance(value, int) or not 1 <= value <= 10 for value in values):
+                raise ValueError(f"protocol.{split}_paths must contain path ids in 1..10.")
+            if len(values) != len(set(values)):
+                raise ValueError(f"protocol.{split}_paths cannot contain duplicates.")
+            groups[split] = set(values)
+        if (groups["train"] & groups["validation"] or
+                groups["train"] & groups["test"] or
+                groups["validation"] & groups["test"]):
+            raise ValueError("protocol path splits must be disjoint.")
+        if len(groups["train"]) < 2:
+            raise ValueError("Cross-path training requires at least two training paths.")
     return cfg
 
 
@@ -130,4 +151,7 @@ def load_torch(path):
 
 def bank_signature_cfg(cfg):
     """Settings defining the bank; changes to training epochs do not invalidate it."""
-    return copy.deepcopy({k: cfg[k] for k in ("path_id", "sample_rate", "filter_length", "scene_names", "split", "wiener", "features", "metrics")})
+    signature = copy.deepcopy({k: cfg[k] for k in ("path_id", "sample_rate", "filter_length", "scene_names", "split", "wiener", "features", "metrics")})
+    if "protocol" in cfg:
+        signature["protocol"] = copy.deepcopy(cfg["protocol"])
+    return signature

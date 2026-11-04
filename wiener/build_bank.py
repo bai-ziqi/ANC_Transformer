@@ -13,9 +13,12 @@ from data.preprocess import fit_normalizer
 from utils import bank_signature_cfg, common_parser, dump_json, load_config, seed_everything
 from wiener.calculate_wiener import (calibration_audio, choose_candidate, collect_statistics,
                                     energy_diagnostics, solve_candidates)
+from wiener.build_cross_path import build_cross_path_bank
 
 
 def build_bank(cfg):
+    if cfg.get("protocol", {}).get("mode") == "cross_path":
+        return build_cross_path_bank(cfg)
     seed_everything(cfg["seed"])
     manifest, secondary = inspect(cfg), load_secondary(cfg)
     statistics, audio, provenance, filters, selections, candidates_report = [], [], [], [], [], {}

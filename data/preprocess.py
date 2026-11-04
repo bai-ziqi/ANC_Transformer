@@ -36,8 +36,10 @@ def fit_normalizer(cfg, manifest):
     with torch.no_grad():
         for scene in manifest["scenes"]:
             a, b = scene["ranges"]["train"]
+            sources = scene["sources"]
+            raw_source = sources[0] if isinstance(sources, list) else sources["raw"]
             for start in np.linspace(a, b - obs, count, dtype=np.int64):
-                x = torch.tensor(read_mono(scene["sources"][0]["path"], int(start), obs), dtype=torch.float32)
+                x = torch.tensor(read_mono(raw_source["path"], int(start), obs), dtype=torch.float32)
                 features = transform(x[None]).squeeze(0).double()
                 s, q = features.sum(0), features.square().sum(0)
                 total = s if total is None else total + s
