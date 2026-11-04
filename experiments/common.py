@@ -153,7 +153,9 @@ def evaluate(cfg, model, bundle, split, methods=("transformer",)):
         if cross_path:
             path_indices = torch.tensor([bank_path_ids.index(int(v)) for v in path_ids.cpu()],
                                         device=device, dtype=torch.long)
-            scene_prior = prior_filter.double()
+            # The data loader deliberately returns priors on CPU. Evaluation
+            # must move them with the audio and model before building baselines.
+            scene_prior = prior_filter.to(device).double()
             pooled_batch = pooled[path_indices]
             mean_batch = bank.mean(dim=0)[path_indices]
             batch_secondary = batch["secondary_path"].to(device)
