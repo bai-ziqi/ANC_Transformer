@@ -180,10 +180,11 @@ def evaluate(cfg, model, bundle, split, methods=("transformer",)):
                        "disturbance_mse": float(np.mean(target[i] ** 2)), **metrics}
                 if method == "transformer":
                     target_prior = scene_prior[i]
-                    row["relative_filter_mse"] = float(
+                    relative_error = (
                         (candidates[method][i] - target_prior).square().sum() /
-                        target_prior.square().sum().clamp_min(1e-12).cpu()
+                        target_prior.square().sum().clamp_min(1e-12)
                     )
+                    row["relative_filter_mse"] = float(relative_error.detach().cpu())
                 rows.append(row)
     return rows
 
