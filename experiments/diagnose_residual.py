@@ -210,7 +210,11 @@ def diagnose(cfg, split="validation"):
             f'NR={row["transformer_primary_nr_db"]:.3f} dB '
             f'delta={row["mean_primary_nr_delta_db"]:+.3f} dB; '
             f'MSE delta={row["mean_residual_mse_delta"]:+.6e}; '
-            f'correction L2={row["mean_correction_relative_l2"]:.4f}'
+            f'worse MSE={row["percent_episodes_higher_mse"]:.1f}%; '
+            f'top10 MSE share={100 * row["top10_positive_mse_share"]:.1f}%; '
+            f'top10 NR-loss share={100 * row["top10_primary_nr_loss_share"]:.1f}%; '
+            f'correction L2 mean/p95={row["mean_correction_relative_l2"]:.4f}/'
+            f'{row["p95_correction_relative_l2"]:.4f}'
         )
     print("Top positive-MSE-delta episodes:")
     for row in top_damage[:10]:
