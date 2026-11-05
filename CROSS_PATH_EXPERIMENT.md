@@ -63,7 +63,20 @@ python -m experiments.train --config config.cross_path.residual.yaml
 # Development comparison on validation paths 8-9 only.
 python -m experiments.compare --config config.cross_path.yaml --split validation
 python -m experiments.compare --config config.cross_path.residual.yaml --split validation
+
+# Paired root-cause audit against each episode's unchanged Wiener prior.
+python -m experiments.diagnose_residual --config config.cross_path.residual.yaml --split validation
 ```
+
+The residual diagnostic writes episode-level NR/MSE deltas, path summaries,
+one-third-octave band deltas from 50 Hz through Nyquist, and the episodes contributing
+the largest positive MSE change. Positive `residual_mse_delta` and negative
+`primary_nr_delta_db` mean the model is worse than the paired prior.
+
+The episode audit reports both the raw MSE change that contributes to the
+overall mean and the change relative to each episode's prior residual. The
+extended band table covers 50 Hz through Nyquist; `maximum_rebound_db` keeps
+the original 1-8 kHz project definition.
 
 Do not run the test comparison until the validation experiment and hyperparameters are frozen:
 

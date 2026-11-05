@@ -12,11 +12,12 @@ import yaml
 from scipy.signal import lfilter
 
 from anc.anc_simulator import simulate, simulate_numpy
-from anc.metrics import power_spectrum, score_signals
+from anc.metrics import power_spectrum, score_signals, third_octave_band_power
 from data.cross_path import CrossPathWindows
 from data.dataset import ANCWindows
 from data.inspect_data import inspect, read_mono
 from experiments.common import evaluate, load_model, losses, save_evaluation, verified_bundle
+from experiments.diagnose_residual import diagnose as diagnose_residual
 from experiments.train import train
 from models.anc_transformer import ANCTransformer
 from models.filter_head import FilterHead
@@ -146,6 +147,11 @@ def test_spectrum_matches_original_torch_scoring_convention():
     expected[1:-1] *= 2
     np.testing.assert_allclose(power_spectrum(x, n_fft, hop), expected.numpy(), rtol=1e-12, atol=1e-12)
 
+    centres, off = third_octave_band_power(x, 48000, n_fft, hop)
+    other_centres, on = third_octave_band_power(x * 0.5, 48000, n_fft, hop)
+    np.testing.assert_array_equal(centres, other_centres)
+    np.testing.assert_allclose(off / on, 4.0, rtol=1e-12)
+
 
 def test_rope_preserves_norm_and_depends_on_temporal_position():
     query = torch.randn(2, 4, 7, 8)
@@ -269,6 +275,9 @@ def test_end_to_end_model_is_prior_conditioned_and_comparison_is_paired(tiny_con
     for name in cfg["scene_names"]:
         scene_rows = [r for r in rows if r["scene"] == name]
         assert len({(r["observation_start"], r["control_start"], r["scored_samples"]) for r in scene_rows}) == 1
+    diagnostic = diagnose_residual(cfg, "validation")
+    assert diagnostic["path_summary"][0]["episodes"] == 8
+    assert diagnostic["frequency_summary"]
     changed = copy.deepcopy(cfg)
     changed = copy.deepcopy(cfg)
     changed["protocol"]["test_paths"] = [3]

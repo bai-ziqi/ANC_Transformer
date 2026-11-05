@@ -26,6 +26,20 @@ def power_spectrum(x, n_fft, hop):
     return power
 
 
+def third_octave_band_power(x, sample_rate=48000, n_fft=8192, hop_length=2048):
+    """Return complete unweighted one-third-octave band powers."""
+    spectrum = power_spectrum(x, n_fft, hop_length)
+    frequencies = np.fft.rfftfreq(n_fft, 1 / sample_rate)
+    factor = 2 ** (1 / 6)
+    centres, power = [], []
+    for centre in CENTRES:
+        mask = (frequencies >= centre / factor) & (frequencies < centre * factor)
+        if centre * factor <= sample_rate / 2 and mask.any():
+            centres.append(centre)
+            power.append(spectrum[mask].sum())
+    return np.asarray(centres), np.asarray(power)
+
+
 def score_signals(disturbance, residual, control, sample_rate=48000, n_fft=8192, hop_length=2048):
     d, e, y = [np.asarray(x, dtype=np.float64) for x in (disturbance, residual, control)]
     if d.ndim != 1 or d.shape != e.shape or d.shape != y.shape or not d.size:
@@ -34,17 +48,10 @@ def score_signals(disturbance, residual, control, sample_rate=48000, n_fft=8192,
         raise ValueError("Nonfinite signals cannot be scored.")
     if n_fft <= 0 or not 0 < hop_length <= n_fft:
         raise ValueError("Invalid spectral window/hop.")
-    pd, pe = [power_spectrum(x, n_fft, hop_length) for x in (d, e)]
-    frequencies = np.fft.rfftfreq(n_fft, 1 / sample_rate)
-    factor = 2 ** (1 / 6)
-    off, on, centres = [], [], []
-    for centre in CENTRES:
-        mask = (frequencies >= centre / factor) & (frequencies < centre * factor)
-        if centre * factor <= sample_rate / 2 and mask.any():
-            centres.append(centre)
-            off.append(pd[mask].sum())
-            on.append(pe[mask].sum())
-    centres, off, on = map(np.asarray, (centres, off, on))
+    centres, off = third_octave_band_power(d, sample_rate, n_fft, hop_length)
+    centre_check, on = third_octave_band_power(e, sample_rate, n_fft, hop_length)
+    if not np.array_equal(centres, centre_check):
+        raise ValueError("Disturbance and residual band centres differ.")
     nr = 10 * np.log10(np.maximum(off, 1e-30) / np.maximum(on, 1e-30))
     primary = (centres >= 50) & (centres <= 5000)
     high = (centres >= 1000) & (centres <= 8000)
