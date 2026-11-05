@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -217,6 +218,28 @@ def test_splits_reads_and_bank_are_train_only(tiny_config, monkeypatch):
             start = record["observation_start"]
             assert record["split_start"] <= start
             assert start + ds.observation + ds.score <= record["split_end"]
+
+
+def test_epoch_zero_prior_baseline_is_selected_when_training_does_not_improve(
+        tiny_config, monkeypatch):
+    cfg = copy.deepcopy(tiny_config)
+    cfg["model"]["filter_output_mode"] = "residual"
+    cfg["output_dir"] = str(Path(cfg["data_root"]).parent / "epoch_zero_results")
+    cfg["checkpoint_file"] = str(Path(cfg["data_root"]).parent / "epoch_zero_best.pt")
+    build_bank(cfg)
+
+    def no_update(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", no_update)
+    selected = train(cfg)
+    history = json.loads((Path(cfg["output_dir"]) / "training_history.json").read_text(encoding="utf-8"))
+
+    assert [row["epoch"] for row in history] == [0, 1]
+    assert history[0]["baseline"] is True
+    assert history[0]["validation_relative_filter_mse"] == pytest.approx(0.0)
+    assert selected["epoch"] == 0
+    assert selected["validation_loss"] == pytest.approx(history[0]["validation_loss"])
 
 
 def test_end_to_end_model_is_prior_conditioned_and_comparison_is_paired(tiny_config):

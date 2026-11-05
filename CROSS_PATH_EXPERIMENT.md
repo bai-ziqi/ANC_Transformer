@@ -60,6 +60,9 @@ python -m experiments.train --config config.cross_path.yaml
 # Controlled residual-mode comparison; uses the same bank and split.
 python -m experiments.train --config config.cross_path.residual.yaml
 
+# Learning-rate isolation: only residual learning rate and artifacts differ.
+python -m experiments.train --config config.cross_path.residual.lr1e-4.yaml
+
 # Development comparison on validation paths 8-9 only.
 python -m experiments.compare --config config.cross_path.yaml --split validation
 python -m experiments.compare --config config.cross_path.residual.yaml --split validation
@@ -77,6 +80,12 @@ The episode audit reports both the raw MSE change that contributes to the
 overall mean and the change relative to each episode's prior residual. The
 extended band table covers 50 Hz through Nyquist; `maximum_rebound_db` keeps
 the original 1-8 kHz project definition.
+
+Every new training run evaluates the untrained model before the first optimizer
+step and records it as epoch 0 in `training_history.json`. Epoch 0 is eligible
+for checkpoint selection. A later epoch replaces it only when outer validation
+loss is strictly lower, so training cannot silently discard a better residual
+prior initialization.
 
 Do not run the test comparison until the validation experiment and hyperparameters are frozen:
 
