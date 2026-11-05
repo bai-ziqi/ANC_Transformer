@@ -54,8 +54,8 @@ def _aggregate(rows):
             "mean_residual_mse": float(np.mean([v["residual_mse"] for v in values])),
             "maximum_rebound_db": float(max(v["maximum_rebound_db"] for v in values)),
             "mean_relative_filter_mse": float(np.mean([v["relative_filter_mse"] for v in values])),
-            "mean_output_change_l2": float(np.mean([v["output_change_l2"] for v in values])),
-            "mean_output_cosine": float(np.mean([v["output_cosine"] for v in values])),
+            "mean_output_sensitivity_l2": float(np.mean([v["output_sensitivity_l2"] for v in values])),
+            "mean_output_sensitivity_cosine": float(np.mean([v["output_sensitivity_cosine"] for v in values])),
         })
     return summary
 
@@ -120,13 +120,19 @@ def diagnose(cfg, split="validation"):
 
         denominator = correct_prior.square().sum(-1).clamp_min(1e-12)
         correct_norm = correct_prior.norm(dim=-1).clamp_min(1e-12)
+        correct_model_filter = predictions["transformer_correct_prior"]
+        correct_model_norm = correct_model_filter.norm(dim=-1).clamp_min(1e-12)
 
         for variant, coefficients in predictions.items():
             filter_delta = coefficients - correct_prior
             relative_filter_mse = filter_delta.square().sum(-1) / denominator
-            output_change = filter_delta.norm(dim=-1) / correct_norm
-            cosine = (coefficients * correct_prior).sum(-1) / (
+            prior_cosine = (coefficients * correct_prior).sum(-1) / (
                 coefficients.norm(dim=-1).clamp_min(1e-12) * correct_norm
+            )
+            model_delta = coefficients - correct_model_filter
+            output_sensitivity = model_delta.norm(dim=-1) / correct_model_norm
+            output_sensitivity_cosine = (coefficients * correct_model_filter).sum(-1) / (
+                coefficients.norm(dim=-1).clamp_min(1e-12) * correct_model_norm
             )
             outcome = simulate(reference, disturbance, coefficients, secondary, context)
             residual = outcome["residual"].cpu().numpy()
@@ -144,8 +150,9 @@ def diagnose(cfg, split="validation"):
                     "observation_start": int(batch["observation_start"][i]),
                     "residual_mse": float(np.mean(residual[i] ** 2)),
                     "relative_filter_mse": float(relative_filter_mse[i]),
-                    "output_change_l2": float(output_change[i]),
-                    "output_cosine": float(cosine[i]),
+                    "prior_cosine": float(prior_cosine[i]),
+                    "output_sensitivity_l2": float(output_sensitivity[i]),
+                    "output_sensitivity_cosine": float(output_sensitivity_cosine[i]),
                     **metrics,
                 })
 
@@ -160,7 +167,8 @@ def diagnose(cfg, split="validation"):
         "bank_sha256": checkpoint["bank_sha256"],
         "interpretation": (
             "Compare transformer_correct_prior with scene/path-swapped and mean-prior variants. "
-            "Large NR changes show prior sensitivity; low output_change_l2 with unchanged NR shows prior neglect."
+            "Large NR changes show prior usefulness; high output_sensitivity_l2 means the FIR "
+            "changes when the prior changes; low sensitivity with unchanged NR indicates prior neglect."
         ),
     })
     for row in summary:
@@ -168,8 +176,8 @@ def diagnose(cfg, split="validation"):
             print(
                 f'{row["variant"]}: NR={row["mean_primary_nr_db"]:.3f} dB; '
                 f'relative filter MSE={row["mean_relative_filter_mse"]:.4f}; '
-                f'output change={row["mean_output_change_l2"]:.4f}; '
-                f'cosine={row["mean_output_cosine"]:.4f}'
+                f'output sensitivity={row["mean_output_sensitivity_l2"]:.4f}; '
+                f'output cosine={row["mean_output_sensitivity_cosine"]:.4f}'
             )
     print(f"Saved prior diagnostics under {output_root}")
     return summary
