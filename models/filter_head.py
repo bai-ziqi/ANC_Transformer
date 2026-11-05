@@ -17,10 +17,12 @@ class FilterHead(nn.Module):
             nn.Linear(width, taps),
         )
         nn.init.zeros_(self.output[-1].bias)
+        # Consume the same RNG path in both modes. Residual mode then zeroes
+        # this layer, which makes w_hat == w_prior at initialization while
+        # keeping seeded dropout masks comparable with the direct run.
+        nn.init.xavier_uniform_(self.output[-1].weight)
         if output_mode == "residual":
             nn.init.zeros_(self.output[-1].weight)
-        else:
-            nn.init.xavier_uniform_(self.output[-1].weight)
 
     def forward(self, decoded: torch.Tensor, prior_filter: torch.Tensor) -> dict[str, torch.Tensor]:
         scores = self.pool_score(decoded).squeeze(-1)
