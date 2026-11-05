@@ -238,6 +238,7 @@ def save_evaluation(cfg, rows, split, prefix, checkpoint):
     write_csv(root / f"{prefix}_{split}_summary.csv", summary)
     dump_json(root / f"{prefix}_{split}_summary.json", {
         "summary": summary, "split": split, "path_id": cfg.get("path_id"),
+        "filter_output_mode": cfg.get("model", {}).get("filter_output_mode"),
         "split_protocol": cfg.get("protocol", {"mode": "single_path"}),
         "checkpoint_epoch": checkpoint["epoch"], "bank_sha256": checkpoint["bank_sha256"],
         "evaluation_protocol": "reference-only observation; choose/freeze filter; score NEXT interval including secondary cold-start; reference FIR history retained; independent episodes",

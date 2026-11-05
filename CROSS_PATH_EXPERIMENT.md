@@ -14,6 +14,20 @@ w_hat = RMS(w_prior) * normalized FIR
 
 The prior supplies environment conditioning and coefficient scale. The network generates all FIR coefficients; it does not compute `w_prior + residual` in direct mode.
 
+For the controlled residual diagnostic, keep the data, bank, seed, architecture,
+optimizer, and acoustic loss fixed and change only the output parameterization:
+
+```text
+residual mode: w_hat = w_prior + delta_w
+initial state: delta_w = 0, therefore w_hat = w_prior
+```
+
+The direct and residual runs use separate artifact paths. This diagnostic
+separates failures in direct full-FIR generation from failures in prior use:
+a useful residual run should start near the direct prior baseline and learn a
+small correction, rather than searching for all 1967 coefficients from random
+initialization.
+
 ## Path protocol
 
 ```text
@@ -38,12 +52,17 @@ python -m wiener.build_bank --config config.cross_path.yaml
 
 # One-epoch-style smoke check; inspect its loss and metrics before full training.
 python -m experiments.train --config config.cross_path.smoke.yaml
+python -m experiments.train --config config.cross_path.residual.smoke.yaml
 
 # Full path-disjoint training.
 python -m experiments.train --config config.cross_path.yaml
 
+# Controlled residual-mode comparison; uses the same bank and split.
+python -m experiments.train --config config.cross_path.residual.yaml
+
 # Development comparison on validation paths 8-9 only.
 python -m experiments.compare --config config.cross_path.yaml --split validation
+python -m experiments.compare --config config.cross_path.residual.yaml --split validation
 ```
 
 Do not run the test comparison until the validation experiment and hyperparameters are frozen:

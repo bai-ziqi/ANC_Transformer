@@ -19,6 +19,7 @@ from data.inspect_data import inspect, read_mono
 from experiments.common import evaluate, load_model, losses, save_evaluation, verified_bundle
 from experiments.train import train
 from models.anc_transformer import ANCTransformer
+from models.filter_head import FilterHead
 from models.rope import apply_rope
 from utils import DEFAULT_CONFIG, load_config
 from wiener.build_bank import build_bank
@@ -158,6 +159,26 @@ def test_rope_preserves_norm_and_depends_on_temporal_position():
     assert not torch.allclose(positioned[:, :, 0], positioned[:, :, 1])
 
 
+def test_residual_filter_head_starts_at_prior_and_learns_a_delta():
+    torch.manual_seed(23)
+    width, taps, batch = 8, 7, 3
+    decoded = torch.randn(batch, 5, width, requires_grad=True)
+    prior = torch.randn(batch, taps)
+    head = FilterHead(width, taps, output_mode="residual")
+
+    initial = head(decoded, prior)
+    torch.testing.assert_close(initial["filter"], prior)
+    torch.testing.assert_close(initial["prior_scale"], torch.ones(batch, 1))
+
+    with torch.no_grad():
+        head.output[-1].weight.normal_(mean=0.0, std=0.05)
+    adapted = head(decoded, prior)
+    assert not torch.allclose(adapted["filter"], prior)
+    (adapted["filter"] - prior).square().sum().backward()
+    assert head.output[-1].weight.grad.abs().sum() > 0
+    assert torch.isfinite(head.output[-1].weight.grad).all()
+
+
 def test_splits_reads_and_bank_are_train_only(tiny_config, monkeypatch):
     cfg = copy.deepcopy(tiny_config)
     cfg.pop("protocol", None)
@@ -235,6 +256,10 @@ def test_end_to_end_model_is_prior_conditioned_and_comparison_is_paired(tiny_con
     checkpoint = train(cfg)
     assert checkpoint["epoch"] == 1
     selected, loaded_bundle, _ = load_model(cfg)
+    mismatched_mode = copy.deepcopy(cfg)
+    mismatched_mode["model"]["filter_output_mode"] = "residual"
+    with pytest.raises(ValueError, match="Model or future-control protocol differs"):
+        load_model(mismatched_mode)
     rows = evaluate(cfg, selected, loaded_bundle, "test",
                     ("transformer", "scene_wiener", "pooled_wiener", "mean_wiener"))
     assert len(rows) == 32
