@@ -34,6 +34,7 @@ python -m wiener.build_priors --config config.sfanc.smoke.yaml
 python -m wiener.build_targets --config config.sfanc.smoke.yaml --limit 8 --resume
 CUDA_VISIBLE_DEVICES=0 python -m experiments.train --config config.sfanc.smoke.yaml
 CUDA_VISIBLE_DEVICES=0 python -m experiments.compare --config config.sfanc.smoke.yaml --split validation
+python -m wiener.diagnose_labels --config config.sfanc.smoke.yaml --count 2
 ```
 
 正式运行将配置换成 `config.sfanc.yaml` 并移除 `--limit`。
@@ -60,7 +61,8 @@ ANC_Transformer/
 ├── wiener/
 │   ├── calculate_wiener.py       # 计算相关统计、求解 Wiener 候选并评分。
 │   ├── build_priors.py           # 独立宽带校准得到每个环境的一条先验。
-│   └── build_targets.py          # 生成逐样本 FIR 标签、候选诊断与续算缓存。
+│   ├── build_targets.py          # 生成逐样本 FIR 标签、候选诊断与续算缓存。
+│   └── diagnose_labels.py        # 只读比较缓存标签、先验和精确有限窗口最小二乘。
 ├── models/
 │   ├── anc_transformer.py        # 组装网络并校验波形、先验及输出尺寸。
 │   ├── encoder.py                # 编码噪声时频特征并形成查询。

@@ -22,6 +22,7 @@ from utils import dump_json, load_config
 from wiener.build_priors import build_priors
 from wiener.build_targets import build_targets
 from wiener.calculate_wiener import fit_wiener_array
+from wiener.diagnose_labels import diagnose_labels
 
 
 @pytest.fixture
@@ -74,6 +75,22 @@ def test_candidate_selection_is_actual_same_clip_mse():
     assert selected["residual_mse"] == pytest.approx(mse, rel=1e-12)
     assert mse == pytest.approx(min(row["residual_mse"] for row in rows), rel=1e-12)
     assert selected["absolute_ridge"] == selected["ridge_ratio"] * selected["filtered_reference_power"]
+
+
+def test_label_diagnostics_compare_cached_prior_and_exact_window(sfanc_config):
+    build_priors(sfanc_config)
+    build_targets(sfanc_config)
+    report, filters = diagnose_labels(
+        sfanc_config, split="validation", indices=[0], count=None,
+        ridge_ratios=[0.0, 0.1], maxiter=1000,
+    )
+    assert report["scope"].startswith("read-only")
+    assert report["summary"]["samples"] == 1
+    sample = report["samples"][0]
+    assert abs(sample["cached_label"]["rescoring_relative_difference"]) < 1e-8
+    assert len(sample["exact_finite_window_candidates"]) == 2
+    assert filters["prior_filters"].shape == (1, sfanc_config["filter_length"])
+    assert filters["exact_ls_filters"].shape == (1, 2, sfanc_config["filter_length"])
 
 
 def test_default_config_uses_sfanc_dimensions_without_scene_classes():
