@@ -12,8 +12,15 @@ class NoiseEncoder(nn.Module):
     def __init__(self, feature_cfg, model_cfg, normalizer):
         super().__init__()
         self.features = LogSpectrum(feature_cfg)
-        self.register_buffer("feature_mean", normalizer["mean"].clone())
-        self.register_buffer("feature_std", normalizer["std"].clone())
+        mean, std = normalizer["mean"], normalizer["std"]
+        expected = (feature_cfg["frequency_bins"],)
+        if (not isinstance(mean, torch.Tensor) or not isinstance(std, torch.Tensor)
+                or tuple(mean.shape) != expected or tuple(std.shape) != expected):
+            raise ValueError(f"Feature normalizer mean/std must have shape {expected}.")
+        if not torch.isfinite(mean).all() or not torch.isfinite(std).all() or not (std > 0).all():
+            raise ValueError("Feature normalizer must be finite with strictly positive std.")
+        self.register_buffer("feature_mean", mean.float().clone())
+        self.register_buffer("feature_std", std.float().clone())
         width = model_cfg["d_model"]
         self.projection = nn.Linear(feature_cfg["frequency_bins"], width)
         self.encoder = nn.ModuleList([

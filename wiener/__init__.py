@@ -1,1 +1,1 @@
-"""Train-only scene and pooled Wiener controllers."""
+"""Per-environment broadband priors and per-clip Wiener candidate targets."""

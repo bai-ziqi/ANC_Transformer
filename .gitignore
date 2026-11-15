@@ -3,8 +3,8 @@ __pycache__/
 *.pyc
 checkpoints/*.pt
 wiener/*.pt
+wiener/*_targets/
+wiener/*_priors.npz
+wiener/*_priors.json
 results/
-data/NOISE/
-data/EXPECTED_NOISE/
-data/sh.npy
 .venv/

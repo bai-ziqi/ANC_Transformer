@@ -1,4 +1,4 @@
-"""Evaluate the selected Transformer on untouched future test episodes."""
+"""Evaluate the selected Transformer on held-out offline test clips."""
 from experiments.common import evaluate, load_model, save_evaluation
 from utils import common_parser, load_config
 

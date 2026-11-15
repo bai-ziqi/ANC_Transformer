@@ -1,1 +1,1 @@
-"""Audio is referenced by config.data_root; no multi-GB dataset copy is needed."""
+"""SFANC WAV manifests, environment paths, and per-clip target datasets."""

@@ -11,28 +11,82 @@ from models.rope import RoPESelfAttention
 
 
 class WienerPriorTokenizer(nn.Module):
-    """Represent one broadband FIR by ordered frequency-band tokens."""
-    def __init__(self, taps: int, width: int, token_count: int):
+    """Represent one environment FIR prior as learned or pooled FFT tokens."""
+    SUPPORTED_MODES = ("linear", "mlp", "fft_pool")
+
+    def __init__(
+        self,
+        taps: int,
+        width: int,
+        token_count: int,
+        mode: str = "linear",
+        normalize_input: bool = False,
+        hidden_dim: int = 256,
+        dropout: float = 0.0,
+        add_frequency_embedding: bool = True,
+    ):
         super().__init__()
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(
+                f"prior_tokenizer must be one of {self.SUPPORTED_MODES}; got {mode}."
+            )
+        if token_count <= 0 or width <= 0:
+            raise ValueError("token_count and width must be positive.")
+        if mode == "mlp" and hidden_dim <= 0:
+            raise ValueError("prior_hidden_dim must be positive for MLP tokenization.")
         self.taps = taps
+        self.width = width
         self.tokens = token_count
-        self.fft_size = 1 << (taps - 1).bit_length()
-        self.projection = nn.Linear(2, width)
-        self.frequency_embedding = nn.Parameter(torch.empty(1, token_count, width))
-        nn.init.normal_(self.frequency_embedding, std=0.02)
+        self.mode = mode
+        self.normalize_input = normalize_input
+        output_dim = token_count * width
+        if mode == "linear":
+            # Learn the FIR-to-token decomposition directly instead of fixing it
+            # to an FFT followed by average pooling.
+            self.projection = nn.Linear(taps, output_dim)
+        elif mode == "mlp":
+            self.projection = nn.Sequential(
+                nn.Linear(taps, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, output_dim),
+            )
+        else:
+            self.fft_size = 1 << (taps - 1).bit_length()
+            self.projection = nn.Linear(2, width)
+        if add_frequency_embedding:
+            self.frequency_embedding = nn.Parameter(torch.empty(1, token_count, width))
+            nn.init.normal_(self.frequency_embedding, std=0.02)
+        else:
+            self.register_parameter("frequency_embedding", None)
 
     def forward(self, prior_filter: torch.Tensor) -> torch.Tensor:
         if prior_filter.ndim != 2:
             raise ValueError("prior_filter must have shape [B,taps].")
-        scale = prior_filter.square().mean(-1, keepdim=True).sqrt().clamp_min(1e-8)
-        spectrum = torch.fft.rfft(prior_filter / scale, n=self.fft_size)
-        features = torch.stack((spectrum.real, spectrum.imag), dim=-1)
-        features = F.adaptive_avg_pool1d(features.transpose(1, 2), self.tokens).transpose(1, 2)
-        return self.projection(features) + self.frequency_embedding
+        if prior_filter.shape[1] != self.taps:
+            raise ValueError(f"prior_filter must have {self.taps} taps.")
+        source = prior_filter
+        if self.normalize_input:
+            scale = source.square().mean(-1, keepdim=True).sqrt().clamp_min(1e-8)
+            source = source / scale
+        if self.mode == "fft_pool":
+            spectrum = torch.fft.rfft(source, n=self.fft_size)
+            features = torch.stack((spectrum.real, spectrum.imag), dim=-1)
+            features = F.adaptive_avg_pool1d(
+                features.transpose(1, 2), self.tokens
+            ).transpose(1, 2)
+            tokens = self.projection(features)
+        else:
+            tokens = self.projection(source).reshape(
+                prior_filter.shape[0], self.tokens, self.width
+            )
+        if self.frequency_embedding is not None:
+            tokens = tokens + self.frequency_embedding
+        return tokens
 
 
 class PriorCrossAttention(nn.Module):
-    """Time query reads ordered Wiener frequency-band memory."""
+    """Encoder time queries read the environment's Wiener-prior tokens."""
     def __init__(self, width: int, heads: int, dropout: float):
         super().__init__()
         if width % heads:
@@ -85,7 +139,16 @@ class WienerDecoder(nn.Module):
     def __init__(self, taps: int, cfg):
         super().__init__()
         width = cfg["d_model"]
-        self.prior_tokenizer = WienerPriorTokenizer(taps, width, cfg["prior_tokens"])
+        self.prior_tokenizer = WienerPriorTokenizer(
+            taps,
+            width,
+            cfg["prior_tokens"],
+            mode=cfg.get("prior_tokenizer", "linear"),
+            normalize_input=cfg.get("prior_normalize", False),
+            hidden_dim=cfg.get("prior_hidden_dim", 256),
+            dropout=cfg.get("dropout", 0.0),
+            add_frequency_embedding=cfg.get("prior_frequency_embedding", True),
+        )
         self.layers = nn.ModuleList([
             PriorDecoderLayer(
                 width,

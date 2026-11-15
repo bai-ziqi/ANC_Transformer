@@ -26,7 +26,7 @@ def power_spectrum(x, n_fft, hop):
     return power
 
 
-def third_octave_band_power(x, sample_rate=48000, n_fft=8192, hop_length=2048):
+def third_octave_band_power(x, sample_rate=16000, n_fft=2048, hop_length=512):
     """Return complete unweighted one-third-octave band powers."""
     spectrum = power_spectrum(x, n_fft, hop_length)
     frequencies = np.fft.rfftfreq(n_fft, 1 / sample_rate)
@@ -40,7 +40,7 @@ def third_octave_band_power(x, sample_rate=48000, n_fft=8192, hop_length=2048):
     return np.asarray(centres), np.asarray(power)
 
 
-def score_signals(disturbance, residual, control, sample_rate=48000, n_fft=8192, hop_length=2048):
+def score_signals(disturbance, residual, control, sample_rate=16000, n_fft=2048, hop_length=512):
     d, e, y = [np.asarray(x, dtype=np.float64) for x in (disturbance, residual, control)]
     if d.ndim != 1 or d.shape != e.shape or d.shape != y.shape or not d.size:
         raise ValueError("Scores require matching nonempty 1-D signals.")

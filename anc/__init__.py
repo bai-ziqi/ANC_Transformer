@@ -1,1 +1,1 @@
-"""Physical simulation and the project's third-octave metric convention."""
+"""Causal PP/SP simulation and residual-noise evaluation metrics."""

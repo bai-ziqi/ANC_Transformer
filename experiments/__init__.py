@@ -1,1 +1,1 @@
-"""CLI entry points: python -m experiments.train / test / compare."""
+"""SFANC training, validation comparisons, and held-out test entry points."""

@@ -1,4 +1,4 @@
-"""Provenance validation, losses, and identical evaluation episodes for baselines."""
+"""Provenance validation, losses, and identical offline clips for baselines."""
 from __future__ import annotations
 
 import csv
@@ -11,44 +11,17 @@ from torch.utils.data import DataLoader
 
 from anc.anc_simulator import simulate
 from anc.metrics import score_signals
-from data.cross_path import CrossPathWindows, inspect_cross_path
-from data.dataset import ANCWindows
-from data.inspect_data import inspect
+from data.sfanc import SfancDataset, load_training_bundle
 from models.anc_transformer import ANCTransformer
-from utils import bank_signature_cfg, device_for, dump_json, load_torch, sha256
+from utils import device_for, dump_json, load_torch, sha256
 
 
 def verified_bundle(cfg):
-    bundle = load_torch(cfg["bank_file"])
-    version = bundle.get("format_version")
-    if version not in (1, 2) or bundle["config_signature"] != bank_signature_cfg(cfg):
-        raise ValueError("Bank configuration changed. Rebuild bank for this config.")
-    if version == 1:
-        if bundle["manifest"] != inspect(cfg):
-            raise ValueError("Dataset metadata/splits changed since bank creation. Rebuild bank.")
-        expected = (8, cfg["filter_length"])
-        if tuple(bundle["filters"].shape) != expected or not torch.isfinite(bundle["filters"]).all():
-            raise ValueError("Invalid Wiener bank shape/coefficients.")
-    else:
-        if bundle["manifest"] != inspect_cross_path(cfg):
-            raise ValueError("Dataset metadata/splits changed since bank creation. Rebuild bank.")
-        path_ids = [int(value) for value in bundle.get("path_ids", [])]
-        expected = (8, len(path_ids), cfg["filter_length"])
-        if not path_ids or path_ids != list(bundle["manifest"]["path_ids"]):
-            raise ValueError("Cross-path bank has invalid path ids.")
-        for key, shape in (
-            ("filters", expected),
-            ("pooled_filters", (len(path_ids), cfg["filter_length"])),
-            ("secondary_paths", (len(path_ids), cfg["filter_length"])),
-        ):
-            value = bundle.get(key)
-            if value is None or tuple(value.shape) != shape or not torch.isfinite(value).all():
-                raise ValueError(f"Invalid cross-path {key} shape/coefficients.")
-    return bundle
+    return load_training_bundle(cfg)
 
 
 def acoustic_mse(result, batch, secondary=None):
-    """Differentiable mean squared error over the future control interval."""
+    """Differentiable residual MSE over the configured full-clip interval."""
     reference = batch["reference"].to(result["filter"].device, dtype=torch.float64)
     disturbance = batch["disturbance"].to(result["filter"].device, dtype=torch.float64)
     coefficients = result["filter"].to(torch.float64)
@@ -64,18 +37,21 @@ def acoustic_mse(result, batch, secondary=None):
 
 
 def losses(result, cfg, batch, secondary=None):
-    target = result.get("prior_filter", batch.get("prior_filter"))
+    target = batch.get("target_filter")
     if target is None:
-        relative_mse = result["filter"].new_zeros(())
-    else:
-        target = target.to(result["filter"].device, dtype=result["filter"].dtype)
-        relative_mse = ((result["filter"] - target).square().sum(-1) /
-                        target.square().sum(-1).clamp_min(1e-12)).mean()
-    acoustic = acoustic_mse(result, batch, secondary)
+        raise ValueError("SFANC supervision requires target_filter; prior_filter is an input, not a label.")
+    if not isinstance(target, torch.Tensor) or target.shape != result["filter"].shape:
+        raise ValueError("target_filter must have exactly the predicted filter shape [B,filter_length].")
+    target = target.to(result["filter"].device, dtype=result["filter"].dtype)
+    relative_mse = ((result["filter"] - target).square().sum(-1) /
+                    target.square().sum(-1).clamp_min(1e-12)).mean()
     mode = cfg["training"]["loss_mode"]
     filter_weight = cfg["training"]["filter_loss_weight"]
     acoustic_weight = cfg["training"]["acoustic_loss_weight"]
-    values = {"acoustic_mse": acoustic, "relative_filter_mse": relative_mse}
+    values = {"relative_filter_mse": relative_mse}
+    if mode in ("acoustic", "combined"):
+        acoustic = acoustic_mse(result, batch, secondary)
+        values["acoustic_mse"] = acoustic
     if mode in ("filter", "combined"):
         values["weighted_filter_loss"] = filter_weight * relative_mse
     if mode in ("acoustic", "combined"):
@@ -84,25 +60,13 @@ def losses(result, cfg, batch, secondary=None):
     return values
 
 
-def prior_for(model, bank, labels, batch):
-    """Return one broadband prior for every sample; never pool priors."""
-    if getattr(model, "architecture", None) != "prior_adaptive":
-        return None
-    if "prior_filter" in batch:
-        return batch["prior_filter"]
-    # Compatibility bridge for the current 8-scene dataset: the row's scene
-    # selects its own broadband prior. The model itself has no 8-way assumption.
-    return bank[labels]
+def prior_for(batch):
+    """Return the independently calibrated prior for each sample's environment."""
+    return batch["prior_filter"]
 
 
 def loader_for(cfg, bundle, split, shuffle=False):
-    if bundle["format_version"] == 2:
-        dataset = CrossPathWindows(
-            cfg, bundle["manifest"], split,
-            bundle["filters"], bundle["secondary_paths"],
-        )
-    else:
-        dataset = ANCWindows(cfg, bundle["manifest"], split)
+    dataset = SfancDataset(cfg, bundle, split)
     generator = torch.Generator().manual_seed(cfg["seed"])
     return DataLoader(dataset, batch_size=cfg["training"]["batch_size"], shuffle=shuffle,
                       num_workers=cfg["training"]["num_workers"], generator=generator)
@@ -111,13 +75,16 @@ def loader_for(cfg, bundle, split, shuffle=False):
 def load_model(cfg, checkpoint_file=None):
     bundle = verified_bundle(cfg)
     checkpoint = load_torch(checkpoint_file or cfg["checkpoint_file"])
-    if checkpoint.get("format_version") != 4:
-        raise ValueError("Checkpoint predates direct-FIR/cross-path training. Retrain it.")
+    if checkpoint.get("format_version") != 5:
+        raise ValueError("Checkpoint is incompatible with the SFANC experiment. Retrain it.")
     if checkpoint["bank_sha256"] != sha256(cfg["bank_file"]):
         raise ValueError("Checkpoint belongs to a different bank. Retrain using this bank.")
     saved = checkpoint["config"]
-    if saved["model"] != cfg["model"] or saved["dataset"]["control_seconds"] != cfg["dataset"]["control_seconds"]:
-        raise ValueError("Model or future-control protocol differs from training checkpoint.")
+    if checkpoint.get("targets_index_sha256") != sha256(Path(cfg["targets_dir"]) / "index.json"):
+        raise ValueError("Checkpoint belongs to a different target-label index. Retrain using these labels.")
+    keys = ("model", "features", "dataset", "protocol", "sample_rate", "filter_length")
+    if any(saved.get(key) != cfg.get(key) for key in keys):
+        raise ValueError("SFANC model, features, lengths or clip protocol differs from training checkpoint.")
     for key in ("loss_mode", "acoustic_loss_weight", "filter_loss_weight"):
         if saved["training"].get(key) != cfg["training"].get(key):
             raise ValueError(f"Training objective differs at {key}. Retrain the checkpoint.")
@@ -128,89 +95,73 @@ def load_model(cfg, checkpoint_file=None):
 
 @torch.no_grad()
 def evaluate(cfg, model, bundle, split, methods=("transformer",)):
-    allowed = {"transformer", "scene_wiener", "pooled_wiener", "mean_wiener"}
+    allowed = {"transformer", "zero_filter", "environment_prior", "sample_wiener"}
     if not methods or not set(methods).issubset(allowed):
-        raise ValueError("Unknown/empty baseline list.")
+        raise ValueError("Unknown/empty SFANC baseline list.")
     model.eval()
     device = next(model.parameters()).device
-    bank = bundle["filters"].to(device)
-    cross_path = bundle["format_version"] == 2
-    if cross_path:
-        pooled = bundle["pooled_filters"].to(device)
-        bank_path_ids = [int(value) for value in bundle["path_ids"]]
-    else:
-        secondary = bundle["secondary_path"].to(device)
-        pooled = bundle["pooled_filter"].to(device)
     rows = []
     for batch in loader_for(cfg, bundle, split):
-        labels = batch["scene_id"].to(device)
-        prior_filter = prior_for(model, bank, labels, batch)
-        prediction = model(batch["observation"].to(device), prior_filter=prior_filter)
-        reference = batch["reference"].to(device)
-        disturbance = batch["disturbance"].to(device)
+        reference = batch["reference"].to(device, dtype=torch.float64)
+        disturbance = batch["disturbance"].to(device, dtype=torch.float64)
+        secondary = batch["secondary_path"].to(device, dtype=torch.float64)
+        prior = batch["prior_filter"].to(device, dtype=torch.float64)
+        target = batch["target_filter"].to(device, dtype=torch.float64)
+        prediction = model(batch["observation"].to(device), prior_filter=prior)
+        candidates = {
+            "transformer": prediction["filter"].double(),
+            "zero_filter": torch.zeros_like(prior),
+            "environment_prior": prior,
+            "sample_wiener": target,
+        }
         context = int(batch["context"][0])
-        path_ids = batch["path_id"].to(device) if cross_path else torch.full_like(labels, cfg["path_id"])
-        if cross_path:
-            path_indices = torch.tensor([bank_path_ids.index(int(v)) for v in path_ids.cpu()],
-                                        device=device, dtype=torch.long)
-            # The data loader deliberately returns priors on CPU. Evaluation
-            # must move them with the audio and model before building baselines.
-            scene_prior = prior_filter.to(device).double()
-            pooled_batch = pooled[path_indices]
-            mean_batch = bank.mean(dim=0)[path_indices]
-            batch_secondary = batch["secondary_path"].to(device)
-        else:
-            scene_prior = bank[labels]
-            pooled_batch = pooled[None].expand(len(labels), -1)
-            mean_batch = bank.mean(0)[None].expand(len(labels), -1)
-            batch_secondary = secondary
-        candidates = {"transformer": prediction["filter"].double(),
-                      "scene_wiener": scene_prior.double(),
-                      "pooled_wiener": pooled_batch.double(),
-                      "mean_wiener": mean_batch.double()}
         for method in methods:
-            outcome = simulate(reference, disturbance, candidates[method], batch_secondary, context)
-            residual, control = outcome["residual"].cpu().numpy(), outcome["control"].cpu().numpy()
-            target = disturbance[:, context:].cpu().numpy()
-            for i in range(len(labels)):
-                metrics = score_signals(target[i], residual[i], control[i], cfg["sample_rate"], **cfg["metrics"])
-                row = {"method": method, "scene": batch["scene_name"][i],
-                       "observation_start": int(batch["observation_start"][i]),
-                       "control_start": int(batch["control_start"][i]), "scored_samples": len(target[i]),
-                       "path_id": int(path_ids[i]),
-                       "residual_mse": float(np.mean(residual[i] ** 2)),
-                       "disturbance_mse": float(np.mean(target[i] ** 2)), **metrics}
-                if method == "transformer":
-                    target_prior = scene_prior[i]
-                    relative_error = (
-                        (candidates[method][i] - target_prior).square().sum() /
-                        target_prior.square().sum().clamp_min(1e-12)
-                    )
-                    row["relative_filter_mse"] = float(relative_error.detach().cpu())
-                rows.append(row)
+            coefficients = candidates[method]
+            outcome = simulate(reference, disturbance, coefficients, secondary, context)
+            residual = outcome["residual"].cpu().numpy()
+            control = outcome["control"].cpu().numpy()
+            initial = disturbance[:, context:].cpu().numpy()
+            for i in range(len(initial)):
+                metrics = score_signals(initial[i], residual[i], control[i],
+                                        bundle["sample_rate"], **cfg["metrics"])
+                error = (coefficients[i] - target[i]).square().sum()
+                error = error / target[i].square().sum().clamp_min(1e-12)
+                change = torch.linalg.vector_norm(coefficients[i] - prior[i])
+                change = change / torch.linalg.vector_norm(prior[i]).clamp_min(1e-12)
+                rows.append({
+                    "method": method,
+                    "sample_id": str(batch["sample_id"][i]),
+                    "environment_id": str(batch["environment_id"][i]),
+                    "scored_samples": len(initial[i]),
+                    "residual_mse": float(np.mean(residual[i] ** 2)),
+                    "disturbance_mse": float(np.mean(initial[i] ** 2)),
+                    "relative_filter_mse": float(error.cpu()),
+                    "relative_prior_change_l2": float(change.cpu()),
+                    **metrics,
+                })
     return rows
 
 
 def summarize(rows):
     groups = defaultdict(list)
     for row in rows:
-        method, scene, path = row["method"], row["scene"], int(row["path_id"])
-        for group in ((scene, path), (scene, "ALL"), ("ALL", path), ("ALL", "ALL")):
-            groups[(method, *group)].append(row)
+        for environment in (row["environment_id"], "ALL"):
+            groups[(row["method"], environment)].append(row)
     summaries = []
-    for (method, scene, path), values in sorted(groups.items(), key=lambda item: tuple(map(str, item[0]))):
-        item = {"method": method, "scene": scene, "path_id": path, "episodes": len(values),
-                "mean_primary_nr_db": float(np.mean([v["primary_nr_db"] for v in values])),
-                "minimum_primary_nr_db": float(min(v["primary_nr_db"] for v in values)),
-                "mean_broadband_nr_db": float(np.mean([v["broadband_nr_db"] for v in values])),
-                "mean_residual_mse": float(np.mean([v["residual_mse"] for v in values])),
-                "mean_episode_maximum_rebound_db": float(np.mean([v["maximum_rebound_db"] for v in values])),
-                "maximum_rebound_db": float(max(v["maximum_rebound_db"] for v in values)),
-                "mean_positive_band_rebound_db": float(np.mean([v["mean_positive_band_rebound_db"] for v in values])),
-                "maximum_control_peak_abs": float(max(v["control_peak_abs"] for v in values))}
-        if method == "transformer":
-            item["relative_filter_mse"] = float(np.mean([v["relative_filter_mse"] for v in values]))
-        summaries.append(item)
+    for (method, environment), values in sorted(groups.items()):
+        summaries.append({
+            "method": method, "environment_id": environment, "episodes": len(values),
+            "mean_primary_nr_db": float(np.mean([v["primary_nr_db"] for v in values])),
+            "minimum_primary_nr_db": float(min(v["primary_nr_db"] for v in values)),
+            "mean_broadband_nr_db": float(np.mean([v["broadband_nr_db"] for v in values])),
+            "mean_residual_mse": float(np.mean([v["residual_mse"] for v in values])),
+            "relative_filter_mse": float(np.mean([v["relative_filter_mse"] for v in values])),
+            "mean_relative_prior_change_l2": float(np.mean([v["relative_prior_change_l2"] for v in values])),
+            "maximum_rebound_db": float(max(v["maximum_rebound_db"] for v in values)),
+            "mean_episode_maximum_rebound_db": float(np.mean([v["maximum_rebound_db"] for v in values])),
+            "mean_positive_band_rebound_db": float(np.mean([v["mean_positive_band_rebound_db"] for v in values])),
+            "maximum_control_peak_abs": float(max(v["control_peak_abs"] for v in values)),
+        })
     return summaries
 
 
@@ -229,22 +180,31 @@ def write_csv(path, rows):
 def save_evaluation(cfg, rows, split, prefix, checkpoint):
     root = Path(cfg["output_dir"])
     summary = summarize(rows)
-    protocol_mode = cfg.get("protocol", {}).get("mode", "single_path")
-    if protocol_mode == "cross_path":
-        scope = "Eight known scenes; disjoint acoustic paths with the SAME source recordings; no unseen-scene or cross-recording claim."
-    else:
-        scope = "Eight known scenes; temporally held-out portions of the SAME recordings and one path; no unseen-scene claim."
+    scope = ("SFANC clip-wise supervised FIR experiment. Unseen-path claims require disjoint "
+             "configured environments; one shared path measures only unseen-noise adaptation.")
     write_csv(root / f"{prefix}_{split}_episodes.csv", rows)
     write_csv(root / f"{prefix}_{split}_summary.csv", summary)
+    evaluation_protocol = (
+        "Offline clip-wise evaluation; filter generated from configured observation and independent "
+        "environment prior, then frozen and scored on the whole clip with zero initial state. "
+        "Same boundary as sample-label selection; this is not an online next-window experiment."
+    )
+    reference_note = (
+        "sample_wiener is an offline candidate-grid MSE reference fitted to this clip; "
+        "environment_prior is independently calibrated and is the only filter input. "
+        "Primary NR is an auxiliary 50-5000 Hz equal-band statistic; label selection uses residual MSE."
+    )
     dump_json(root / f"{prefix}_{split}_summary.json", {
-        "summary": summary, "split": split, "path_id": cfg.get("path_id"),
+        "summary": summary, "split": split,
         "filter_output_mode": cfg.get("model", {}).get("filter_output_mode"),
-        "split_protocol": cfg.get("protocol", {"mode": "single_path"}),
+        "split_protocol": cfg["protocol"],
         "checkpoint_epoch": checkpoint["epoch"], "bank_sha256": checkpoint["bank_sha256"],
-        "evaluation_protocol": "reference-only observation; choose/freeze filter; score NEXT interval including secondary cold-start; reference FIR history retained; independent episodes",
-        "reference_note": "scene_wiener is the unchanged per-sample prior; training-only or path-calibration-only FIR, not a global NR upper bound",
-        "classification_scope": scope})
+        "targets_index_sha256": checkpoint["targets_index_sha256"],
+        "evaluation_protocol": evaluation_protocol,
+        "reference_note": reference_note,
+        "evaluation_scope": scope})
     for row in summary:
-        if row["scene"] == "ALL" and row["path_id"] == "ALL":
-            print(f"{row['method']}: mean NR={row['mean_primary_nr_db']:.3f} dB; max rebound={row['maximum_rebound_db']:.3f} dB")
+        if row["environment_id"] == "ALL":
+            print(f"{row['method']}: residual MSE={row['mean_residual_mse']:.6e}; "
+                  f"broadband NR={row['mean_broadband_nr_db']:.3f} dB")
     return summary
