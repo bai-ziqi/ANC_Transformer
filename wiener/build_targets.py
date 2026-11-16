@@ -13,7 +13,10 @@ from data.environments import load_environments
 from data.sfanc import inspect_sfanc, load_noise
 from utils import bank_signature_cfg, load_config, load_torch, sha256
 from wiener.calculate_wiener import fit_wiener_array
-from wiener.finite_window_ls import solve_pure_finite_window_ls
+from wiener.finite_window_ls import (
+    FiniteWindowLSConvergenceError,
+    solve_pure_finite_window_ls,
+)
 
 
 def _json_bytes(value):
@@ -294,12 +297,15 @@ def build_targets(cfg, limit=None, resume=False):
                     "disturbance_mse": float(np.mean(disturbance ** 2)),
                 })
             except Exception as exc:
-                _atomic_json(destination / "last_failure.json", {
+                failure = {
                     "record_id": record["record_id"], "sample_id": record["sample_id"],
                     "environment_id": record["environment_id"], "path": record["path"],
                     "error_type": type(exc).__name__, "error": str(exc),
                     "completed_records": index["completed_records"],
-                })
+                }
+                if isinstance(exc, FiniteWindowLSConvergenceError):
+                    failure["solver_diagnostics"] = exc.diagnostics
+                _atomic_json(destination / "last_failure.json", failure)
                 raise RuntimeError(
                     f"Wiener target failed for {record['sample_id']} in "
                     f"{record['environment_id']}; no samples were silently skipped."

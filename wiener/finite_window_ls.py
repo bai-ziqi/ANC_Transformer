@@ -12,6 +12,10 @@ from anc.anc_simulator import causal_numpy
 class FiniteWindowLSConvergenceError(RuntimeError):
     """Raised when LSMR did not produce a verified minimum-residual solution."""
 
+    def __init__(self, message, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = {} if diagnostics is None else diagnostics
+
 
 def _causal_adjoint(value, filtered_reference, taps):
     """Apply the transpose of the truncated causal-convolution operator."""
@@ -168,8 +172,8 @@ def solve_pure_finite_window_ls(
     """Return and verify the pure full-window least-squares label ``w``.
 
     No ridge regularization or prior anchor is accepted. LSMR must stop for a
-    documented least-squares reason, and the normal-equation residual is recomputed
-    independently from the returned coefficients before this function succeeds.
+    documented least-squares reason, or reach the iteration limit with a passing
+    independently recomputed normal-equation backward error.
     """
     if not np.isfinite(normal_residual_tolerance) or normal_residual_tolerance <= 0:
         raise ValueError("normal_residual_tolerance must be finite and positive.")
@@ -201,29 +205,57 @@ def solve_pure_finite_window_ls(
         operator_norm * target_l2,
         tiny,
     )
+    normal_equation_backward_error_full = gradient_l2 / max(
+        operator_norm * operator_norm * coefficient_norm +
+        operator_norm * residual_l2 + operator_norm * target_l2,
+        tiny,
+    )
     mse = float(np.mean(np.square(residual)))
 
-    # With damp=0, these are the documented successful LSMR outcomes. Condition
-    # loss, a zero solution, and the iteration limit are hard failures for labels.
+    quantized = np.asarray(coefficients, dtype=np.float32)
+    quantized_finite = bool(np.isfinite(quantized).all())
+    if quantized_finite:
+        quantized_residual = target - causal_numpy(
+            reference, quantized.astype(np.float64)
+        )
+        quantized_mse = float(np.mean(np.square(quantized_residual)))
+        quantization_relative_increase = float(
+            (quantized_mse - mse) / max(abs(mse), 1e-30)
+        )
+    else:
+        quantized_mse = None
+        quantization_relative_increase = None
+
+    # With damp=0, these are the documented successful LSMR outcomes. Reaching
+    # maxiter is accepted only after the independently recomputed normal-equation
+    # backward error confirms that the returned coefficients meet label precision.
     acceptable_stops = {1, 2, 4}
     stop = int(diagnostics["lsmr_istop"])
     failure = None
-    if stop not in acceptable_stops:
+    if stop not in acceptable_stops and stop != 7:
         failure = f"LSMR stopped with istop={stop}, not a successful least-squares status"
+        acceptance = "rejected_solver_stop"
     elif normal_equation_backward_error > normal_residual_tolerance:
         failure = (
             "recomputed normal-equation backward error is too large: "
             f"{normal_equation_backward_error:.6e} > {normal_residual_tolerance:.6e}"
         )
-    if failure is not None:
-        raise FiniteWindowLSConvergenceError(failure)
+        acceptance = "rejected_normal_equation_check"
+    elif stop == 7:
+        acceptance = "passed_after_iteration_limit_verified"
+    else:
+        acceptance = "passed"
 
     diagnostics.update({
         "solver": "pure_full_window_lsmr",
         "ridge_relative_to_mean_gram_diagonal": 0.0,
         "absolute_ridge": 0.0,
         "prior_anchor_used": False,
-        "acceptance": "passed",
+        "acceptance": acceptance,
+        "iteration_limit_reached": stop == 7,
+        "iteration_limit_verified": (
+            acceptance == "passed_after_iteration_limit_verified"
+        ),
         "acceptable_lsmr_istop": sorted(acceptable_stops),
         "normal_residual_tolerance": float(normal_residual_tolerance),
         "residual_l2": residual_l2,
@@ -232,9 +264,19 @@ def solve_pure_finite_window_ls(
         "residual_relative_to_disturbance": residual_l2 / max(target_l2, tiny),
         "recomputed_normal_residual_l2": gradient_l2,
         "normal_residual_relative": float(normal_relative),
+        "normal_residual_scale": float(normal_scale),
         "normal_equation_backward_error": float(normal_equation_backward_error),
+        "normal_equation_backward_error_full": float(
+            normal_equation_backward_error_full
+        ),
+        "residual_mse_float32_quantized": quantized_mse,
+        "quantization_relative_increase": quantization_relative_increase,
+        "quantized_coefficients_finite": quantized_finite,
         "coefficient_l2": coefficient_norm,
         "coefficient_peak_abs": float(np.abs(coefficients).max()),
     })
+    if failure is not None:
+        raise FiniteWindowLSConvergenceError(failure, diagnostics=diagnostics)
+
     return coefficients, diagnostics
 

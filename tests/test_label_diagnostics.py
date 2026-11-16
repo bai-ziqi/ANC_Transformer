@@ -64,7 +64,7 @@ def test_pure_finite_window_ls_rejects_iteration_limit():
     rng = np.random.default_rng(70)
     filtered_reference = rng.normal(size=512)
     disturbance = rng.normal(size=512)
-    with pytest.raises(FiniteWindowLSConvergenceError, match="istop=7"):
+    with pytest.raises(FiniteWindowLSConvergenceError) as error:
         solve_pure_finite_window_ls(
             filtered_reference,
             disturbance,
@@ -72,6 +72,38 @@ def test_pure_finite_window_ls_rejects_iteration_limit():
             maxiter=1,
             normal_residual_tolerance=1e-9,
         )
+    diagnostics = error.value.diagnostics
+    assert diagnostics["lsmr_istop"] == 7
+    assert diagnostics["acceptance"] == "rejected_normal_equation_check"
+    assert diagnostics["normal_equation_backward_error"] > 1e-9
+
+
+def test_pure_finite_window_ls_accepts_verified_iteration_limit(monkeypatch):
+    rng = np.random.default_rng(73)
+    taps, samples = 32, 1024
+    filtered_reference = rng.normal(size=samples)
+    expected = rng.normal(scale=0.2, size=taps)
+    disturbance = causal_numpy(filtered_reference, expected)
+
+    def fake_lsmr(operator, right_hand_side, **kwargs):
+        assert right_hand_side.shape == (samples,)
+        return expected, 7, kwargs["maxiter"], 0.0, 0.0, 1.0, 1.0, np.linalg.norm(expected)
+
+    monkeypatch.setattr("wiener.finite_window_ls.lsmr", fake_lsmr)
+    actual, diagnostics = solve_pure_finite_window_ls(
+        filtered_reference,
+        disturbance,
+        taps,
+        maxiter=2000,
+        normal_residual_tolerance=1e-7,
+    )
+
+    np.testing.assert_allclose(actual, expected, atol=1e-12)
+    assert diagnostics["lsmr_istop"] == 7
+    assert diagnostics["acceptance"] == "passed_after_iteration_limit_verified"
+    assert diagnostics["normal_equation_backward_error"] <= 1e-7
+    assert diagnostics["quantized_coefficients_finite"] is True
+    assert np.isfinite(diagnostics["residual_mse_float32_quantized"])
 
 
 def test_causal_operator_adjoint_at_production_shape():
