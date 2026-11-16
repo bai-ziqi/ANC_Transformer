@@ -34,23 +34,26 @@ delay, and coefficient order are preserved.
 ## Two distinct artifacts
 
 1. `wiener.build_targets` pairs each clip with its configured environment, forms
-   `d=P*x` and `z=S*x`, and calls the existing biased-correlation Toeplitz solver.
-   For each candidate `rho`, it solves
-   `(Toeplitz(rzz) + rho*rzz[0]*I)w = rzd`.
-   It selects the candidate with minimum actual same-clip residual MSE from
-   `e=d-S*(w*x)`, using causal linear convolutions and zero initial states. It does
-   not select by average frequency-band NR. Each clip may select a different rho.
-   The label is the best finite candidate-grid reference, not an exact finite-window
-   least-squares global optimum. Every row records candidate scores and selected
-   rho; failed candidates are reported, and a failed sample stops generation.
+   `d=P*x` and `z=S*x`, then solves the pure finite-window least-squares problem
+   `min_w ||d - causal_conv(z,w)||^2` with matrix-free LSMR and no ridge term or
+   prior anchor. The fixed 1024-tap FIR is fitted and scored over the complete clip,
+   including startup with causal zero initial states. A label is accepted only when
+   LSMR reports a successful least-squares stop and an independently recomputed
+   `A.T(d-Aw)` satisfies the configured scaled tolerance. Iteration-limit and
+   condition-limit stops fail generation rather than silently producing a label.
+   Every row records LSMR status, residual and normal-equation diagnostics, the
+   float64 and float32 residual, and comparisons against the independent prior and
+   the legacy Toeplitz candidate. The legacy Toeplitz path remains diagnostic only.
 2. `wiener.build_priors` never reads corpus clips. For each environment it generates
    independent 20-7980-Hz broadband fit and selection streams using named random
    seeds and causal Butterworth SOS filtering. Path/filter warmup is retained, then
    excluded from calibration scoring. It writes one 1024-tap prior per environment.
    The band edges are Butterworth cutoff frequencies, not ideal brick-wall edges.
 
-Targets are float32 compressed chunks plus `index.json` and candidate diagnostics.
-Computation and MSE selection use float64; stored-target MSE is recorded separately.
+Targets are float32 compressed chunks plus `index.json` and least-squares diagnostics.
+Computation and optimum checks use float64; stored-target MSE after float32
+quantization is recorded separately. A configured non-null quantization threshold
+can make an excessive increase fail generation.
 Priors are exported as PT, NPZ, and JSON. Checksums bind the labels, source manifest,
 paths, configuration, and checkpoints. A configuration change requires compatible
 artifacts or a new output directory. `--resume` verifies existing chunks before
@@ -74,7 +77,7 @@ partial. Only the smoke configuration opts into partial training. It uses separa
 artifact paths so it cannot be mistaken for the full 84000-clip run.
 
 The initial inspection reports MAT/vector, sample-rate, split-count, and clip-length
-errors before expensive computation. Review these results and candidate diagnostics
+errors before expensive computation. Review these results and least-squares diagnostics
 before launching the full run. An all-zero/invalid sample is not silently skipped.
 
 ## Full generation and training
@@ -132,7 +135,7 @@ is required for a filter-only loss. Feature normalization is fitted on train cli
 only. The baseline methods are `zero_filter`, `environment_prior`, `sample_wiener`,
 and `transformer`. Results include residual MSE, broadband energy NR, target-filter
 error, and change relative to the prior. The 50-5000-Hz equal-band NR is
-an auxiliary statistic, not the target-candidate selection criterion.
+an auxiliary statistic, not the full-window least-squares label objective.
 
 The default observes the whole WAV and fits/scores the same whole clip, including
 startup. This is an offline same-clip experiment, not a real-time promise that a

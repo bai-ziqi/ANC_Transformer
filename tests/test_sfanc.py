@@ -146,11 +146,22 @@ def test_sfanc_end_to_end_and_resume(sfanc_config):
     priors = build_priors(sfanc_config)
     index = build_targets(sfanc_config)
     assert index["complete"] and index["total_records"] == 4
-    assert index["selection_metric"] == "minimum_causal_residual_mse"
+    assert index["selection_metric"] == "minimum_full_window_causal_residual_mse"
+    assert index["solver"] == "pure_full_window_lsmr"
     for chunk in index["chunks"]:
         diagnostics = json.loads((Path(sfanc_config["targets_dir"]) / chunk["diagnostics_file"]).read_text())
         for record in diagnostics:
-            assert record["selection"]["residual_mse"] == min(row["residual_mse"] for row in record["candidates"])
+            ls = record["least_squares"]
+            assert ls["acceptance"] == "passed"
+            assert ls["prior_anchor_used"] is False
+            assert ls["absolute_ridge"] == 0.0
+            assert ls["normal_equation_backward_error"] <= ls["normal_residual_tolerance"]
+            comparison = record["environment_prior_comparison"]
+            assert comparison["pure_ls_minus_control_relative"] <= \
+                sfanc_config["wiener"]["least_squares"]["control_comparison_relative_tolerance"]
+            if record["toeplitz_comparison"] is not None:
+                assert record["toeplitz_comparison"]["pure_ls_minus_control_relative"] <= \
+                    sfanc_config["wiener"]["least_squares"]["control_comparison_relative_tolerance"]
     assert build_targets(sfanc_config, resume=True) == index
     bundle = load_training_bundle(sfanc_config)
     train_data = SfancDataset(sfanc_config, bundle, "train")
@@ -204,6 +215,7 @@ def test_epoch_zero_is_selected_when_training_does_not_improve(sfanc_config, mon
 
 
 def test_cache_resume_checks_corruption(sfanc_config):
+    build_priors(sfanc_config)
     build_targets(sfanc_config)
     index_path = Path(sfanc_config["targets_dir"]) / "index.json"
     index = json.loads(index_path.read_text())

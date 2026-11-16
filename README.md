@@ -14,7 +14,7 @@
 WAV x ── LogSpectrum ── RoPE Encoder ── observation query
 独立环境 w_prior ── prior tokenizer ── cross attention ── Filter Head ── w_hat
 
-离线标签：d=P*x，z=S*x；Toeplitz Wiener 候选按同段残差 MSE 最小选择 w_target
+离线标签：d=P*x，z=S*x；用完整片段纯有限窗口最小二乘求解 w_target
 训练损失：归一化 FIR 误差；评估残差：e=d-S*(w_hat*x)
 ```
 
@@ -39,7 +39,7 @@ python -m wiener.diagnose_labels --config config.sfanc.smoke.yaml --count 2
 
 正式运行将配置换成 `config.sfanc.yaml` 并移除 `--limit`。
 最终确定模型和参数后才运行 `--split test`；测试结果不参与 epoch 选择。
-详细数据要求、服务器路径、候选选择与缓存续算见 [SFANC_WIENER_WORKFLOW.md](SFANC_WIENER_WORKFLOW.md)。
+详细数据要求、服务器路径、最小二乘标签求解与缓存续算见 [SFANC_WIENER_WORKFLOW.md](SFANC_WIENER_WORKFLOW.md)。
 
 ## 目录说明
 
@@ -61,8 +61,9 @@ ANC_Transformer/
 ├── wiener/
 │   ├── calculate_wiener.py       # 计算相关统计、求解 Wiener 候选并评分。
 │   ├── build_priors.py           # 独立宽带校准得到每个环境的一条先验。
-│   ├── build_targets.py          # 生成逐样本 FIR 标签、候选诊断与续算缓存。
-│   └── diagnose_labels.py        # 只读比较缓存标签、先验和精确有限窗口最小二乘。
+│   ├── build_targets.py          # 生成并验证逐样本纯有限窗口最小二乘 FIR 标签。
+│   ├── finite_window_ls.py       # 矩阵算子和带收敛门槛的纯 LSMR 标签求解核心。
+│   └── diagnose_labels.py        # 只读比较缓存标签、先验和有限窗口候选/精确解。
 ├── models/
 │   ├── anc_transformer.py        # 组装网络并校验波形、先验及输出尺寸。
 │   ├── encoder.py                # 编码噪声时频特征并形成查询。

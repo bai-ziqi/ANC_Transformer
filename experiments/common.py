@@ -190,7 +190,8 @@ def save_evaluation(cfg, rows, split, prefix, checkpoint):
         "Same boundary as sample-label selection; this is not an online next-window experiment."
     )
     reference_note = (
-        "sample_wiener is an offline candidate-grid MSE reference fitted to this clip; "
+        "sample_wiener is the cached verified pure finite-window least-squares reference "
+        "fitted to this clip; "
         "environment_prior is independently calibrated and is the only filter input. "
         "Primary NR is an auxiliary 50-5000 Hz equal-band statistic; label selection uses residual MSE."
     )

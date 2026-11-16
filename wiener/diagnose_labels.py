@@ -1,4 +1,4 @@
-"""Read-only audit of cached Toeplitz labels against finite-window least squares.
+"""Read-only audit of cached labels against finite-window least squares.
 
 The finite-window solution is an offline, in-sample oracle. It is intended to test
 the label estimator and must not be used to claim online ANC generalization.
@@ -10,138 +10,12 @@ import json
 from pathlib import Path
 
 import numpy as np
-from scipy.linalg import toeplitz
-from scipy.signal import correlate
-from scipy.sparse.linalg import LinearOperator, lsmr
 
 from anc.anc_simulator import causal_numpy, simulate_numpy
 from anc.metrics import score_signals
 from data.sfanc import SfancDataset, load_noise, load_training_bundle
 from utils import common_parser, dump_json, load_config
-
-
-def _causal_adjoint(value, filtered_reference, taps):
-    """Apply the transpose of the truncated causal-convolution operator."""
-    value = np.asarray(value, dtype=np.float64)
-    filtered_reference = np.asarray(filtered_reference, dtype=np.float64)
-    if value.ndim != 1 or filtered_reference.ndim != 1 or value.shape != filtered_reference.shape:
-        raise ValueError("Adjoint operands must be matching one-dimensional signals.")
-    if taps <= 0 or len(value) < taps:
-        raise ValueError("Adjoint requires at least `taps` samples.")
-    correlation = correlate(value, filtered_reference, mode="full", method="fft")
-    start = len(value) - 1
-    return correlation[start:start + taps]
-
-
-def causal_window_operator(filtered_reference, taps):
-    """Linear operator mapping w to conv(filtered_reference, w)[:N]."""
-    reference = np.asarray(filtered_reference, dtype=np.float64)
-    if reference.ndim != 1 or not reference.size or not np.isfinite(reference).all():
-        raise ValueError("filtered_reference must be a nonempty finite 1-D vector.")
-    if isinstance(taps, bool) or not isinstance(taps, (int, np.integer)) or taps <= 0:
-        raise ValueError("taps must be a positive integer.")
-    rows, columns = len(reference), int(taps)
-
-    def matvec(coefficients):
-        coefficients = np.asarray(coefficients, dtype=np.float64)
-        if coefficients.shape != (columns,):
-            raise ValueError(f"Expected coefficients with shape ({columns},).")
-        return causal_numpy(reference, coefficients)
-
-    def rmatvec(value):
-        value = np.asarray(value, dtype=np.float64)
-        if value.shape != (rows,):
-            raise ValueError(f"Expected an input with shape ({rows},).")
-        return _causal_adjoint(value, reference, columns)
-
-    return LinearOperator((rows, columns), matvec=matvec, rmatvec=rmatvec,
-                          dtype=np.float64)
-
-
-def _matrix_diagnostics(filtered_reference, taps):
-    """Exact Gram diagnostics; opt-in because the dense design uses O(NW) memory."""
-    reference = np.asarray(filtered_reference, dtype=np.float64)
-    first_column = np.concatenate((reference, np.zeros(taps - 1)))
-    first_row = np.concatenate((reference[:1], np.zeros(taps - 1)))
-    design = toeplitz(first_column, first_row)[:len(reference)]
-    gram = design.T @ design
-    eigenvalues = np.linalg.eigvalsh(gram)
-    largest = float(max(eigenvalues[-1], 0.0))
-    tolerance = largest * max(design.shape) * np.finfo(np.float64).eps
-    positive = eigenvalues[eigenvalues > tolerance]
-    return {
-        "gram_smallest_eigenvalue": float(max(eigenvalues[0], 0.0)),
-        "gram_largest_eigenvalue": largest,
-        "gram_numerical_rank": int(len(positive)),
-        "gram_numerical_tolerance": float(tolerance),
-        "design_condition_number": (float(np.sqrt(largest / positive[0]))
-                                    if len(positive) else None),
-    }
-
-
-def solve_finite_window_ls(filtered_reference, disturbance, taps, relative_ridge=0.0,
-                           anchor=None, *, matrix_diagnostics=False, maxiter=2000):
-    """Solve the exact scored-window objective with an optional prior anchor.
-
-    argmin_w ||d - conv(z,w)[:N]||^2
-             + lambda * ||w - anchor||^2.
-    The ridge scale is relative to the mean diagonal of A.T A.
-    """
-    reference = np.asarray(filtered_reference, dtype=np.float64)
-    target = np.asarray(disturbance, dtype=np.float64)
-    if reference.shape != target.shape or reference.ndim != 1 or len(reference) <= taps:
-        raise ValueError("Finite-window data must be matching 1-D vectors longer than taps.")
-    if not np.isfinite(reference).all() or not np.isfinite(target).all():
-        raise ValueError("Finite-window data must be finite.")
-    relative_ridge = float(relative_ridge)
-    if not np.isfinite(relative_ridge) or relative_ridge < 0:
-        raise ValueError("relative_ridge must be finite and nonnegative.")
-    if anchor is None:
-        anchor = np.zeros(taps, dtype=np.float64)
-    anchor = np.asarray(anchor, dtype=np.float64)
-    if anchor.shape != (taps,) or not np.isfinite(anchor).all():
-        raise ValueError(f"anchor must be a finite vector with shape ({taps},).")
-
-    diagonal = np.asarray([np.square(reference[:len(reference) - index]).sum()
-                           for index in range(taps)], dtype=np.float64)
-    absolute_ridge = relative_ridge * float(diagonal.mean())
-    base = causal_window_operator(reference, taps)
-    if absolute_ridge:
-        sqrt_ridge = np.sqrt(absolute_ridge)
-
-        def matvec(coefficients):
-            return np.concatenate((base.matvec(coefficients), sqrt_ridge * coefficients))
-
-        def rmatvec(value):
-            return base.rmatvec(value[:len(reference)]) + sqrt_ridge * value[len(reference):]
-
-        operator = LinearOperator((len(reference) + taps, taps), matvec=matvec,
-                                  rmatvec=rmatvec, dtype=np.float64)
-        right_hand_side = np.concatenate((target, sqrt_ridge * anchor))
-    else:
-        operator = base
-        right_hand_side = target
-    coefficients, istop, iterations, normr, normar, norma, condition, normx = lsmr(
-        operator, right_hand_side, atol=1e-11, btol=1e-11, maxiter=maxiter,
-    )
-    if not np.isfinite(coefficients).all():
-        raise ValueError("Finite-window least squares returned nonfinite coefficients.")
-    result = {
-        "solver": "lsmr_exact_causal_scored_window",
-        "ridge_relative_to_mean_gram_diagonal": relative_ridge,
-        "absolute_ridge": absolute_ridge,
-        "mean_gram_diagonal": float(diagonal.mean()),
-        "lsmr_istop": int(istop),
-        "lsmr_iterations": int(iterations),
-        "lsmr_normr": float(normr),
-        "lsmr_normar": float(normar),
-        "lsmr_norma": float(norma),
-        "lsmr_condition_estimate": float(condition) if np.isfinite(condition) else None,
-        "lsmr_normx": float(normx),
-    }
-    if matrix_diagnostics:
-        result.update(_matrix_diagnostics(reference, taps))
-    return coefficients, result
+from wiener.finite_window_ls import causal_window_operator, solve_finite_window_ls
 
 
 def _score_filter(reference, disturbance, coefficients, secondary, cfg):
@@ -301,7 +175,8 @@ def diagnose_labels(cfg, split="validation", indices=None, count=8,
             "cached_label": {
                 "scores": cached_scores, "stored_residual_mse": stored_mse,
                 "rescoring_relative_difference": float(consistency),
-                "selected_ridge_ratio": cached_diagnostic["selection"]["ridge_ratio"],
+                "selected_solver": cached_diagnostic["selection"].get("solver"),
+                "selected_ridge_ratio": cached_diagnostic["selection"].get("ridge_ratio"),
                 "selection_min_candidate_relative_difference": (
                     None if diagnostic_consistency is None else float(diagnostic_consistency)),
                 "candidate_rows": cached_diagnostic.get("candidates", []),

@@ -69,6 +69,26 @@ def validate_sfanc_config(cfg, base):
         raise ValueError("ridge_ratios must be finite and nonnegative.")
     if cfg["wiener"].get("target_chunk_size", 0) <= 0:
         raise ValueError("target_chunk_size must be positive.")
+    compare_toeplitz = cfg["wiener"].get("compare_toeplitz", True)
+    if not isinstance(compare_toeplitz, bool):
+        raise ValueError("wiener.compare_toeplitz must be boolean.")
+    least_squares = cfg["wiener"].get("least_squares", {})
+    if not isinstance(least_squares, dict):
+        raise ValueError("wiener.least_squares must be a mapping.")
+    positive = ("atol", "btol", "conlim", "normal_residual_tolerance")
+    nonnegative = ("max_quantization_relative_increase",
+                   "control_comparison_relative_tolerance")
+    for key in positive:
+        value = least_squares.get(key)
+        if value is not None and (not np.isfinite(value) or value <= 0):
+            raise ValueError(f"wiener.least_squares.{key} must be finite and positive.")
+    for key in nonnegative:
+        value = least_squares.get(key)
+        if value is not None and (not np.isfinite(value) or value < 0):
+            raise ValueError(f"wiener.least_squares.{key} must be finite and nonnegative.")
+    maxiter = least_squares.get("maxiter", 2000)
+    if isinstance(maxiter, bool) or not isinstance(maxiter, int) or maxiter <= 0:
+        raise ValueError("wiener.least_squares.maxiter must be a positive integer.")
     prior = cfg["prior"]
     if not 0 < prior["low_hz"] < prior["high_hz"] < cfg["sample_rate"] / 2:
         raise ValueError("Prior band must lie strictly below the Nyquist frequency.")
