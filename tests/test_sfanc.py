@@ -199,6 +199,26 @@ def test_partial_cache_is_explicit_and_opt_in(sfanc_config):
     assert len(SfancDataset(sfanc_config, bundle, "train")) == 1
 
 
+def test_legacy_toeplitz_target_cache_is_selected_explicitly(sfanc_config):
+    build_priors(sfanc_config)
+    build_targets(sfanc_config)
+
+    sfanc_config["target_cache_mode"] = "toeplitz"
+    index_path = Path(sfanc_config["targets_dir"]) / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["format_version"] = 1
+    index["selection_metric"] = "minimum_causal_residual_mse"
+    index["solver"] = "biased_stationary_toeplitz"
+    dump_json(index_path, index)
+
+    bundle = load_training_bundle(sfanc_config)
+    assert bundle["targets_index"]["solver"] == "biased_stationary_toeplitz"
+
+    sfanc_config["target_cache_mode"] = "finite_window_ls"
+    with pytest.raises(ValueError, match="target_cache_mode=finite_window_ls"):
+        load_training_bundle(sfanc_config)
+
+
 def test_epoch_zero_is_selected_when_training_does_not_improve(sfanc_config, monkeypatch):
     sfanc_config["model"]["filter_output_mode"] = "residual"
     build_priors(sfanc_config)

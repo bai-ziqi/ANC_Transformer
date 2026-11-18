@@ -7,6 +7,10 @@ import numpy as np
 
 
 def validate_sfanc_config(cfg, base):
+    target_cache_mode = cfg.get("target_cache_mode", "finite_window_ls")
+    if target_cache_mode not in ("toeplitz", "finite_window_ls"):
+        raise ValueError("target_cache_mode must be toeplitz or finite_window_ls.")
+    cfg["target_cache_mode"] = target_cache_mode
     for key in ("manifest_file", "targets_dir"):
         cfg[key] = str((Path(base) / cfg[key]).resolve())
     for key in ("sample_rate", "filter_length", "primary_length", "secondary_length"):

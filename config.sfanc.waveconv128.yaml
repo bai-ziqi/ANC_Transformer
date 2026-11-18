@@ -5,9 +5,10 @@ primary_length: 512
 secondary_length: 256
 filter_length: 1024
 data_root: /home/zqbai_1/Dataset/Synthesized_Dataset
-manifest_file: results/sfanc_path1_fwls/manifest.json
-targets_dir: wiener/sfanc_path1_fwls_targets
-bank_file: wiener/sfanc_path1_fwls_priors.pt
+target_cache_mode: toeplitz
+manifest_file: results/sfanc_path1/manifest.json
+targets_dir: wiener/sfanc_path1_targets
+bank_file: wiener/sfanc_path1_priors.pt
 output_dir: results/sfanc_path1_waveconv128
 checkpoint_file: checkpoints/sfanc_path1_waveconv128_best.pt
 
@@ -39,15 +40,6 @@ protocol:
 wiener:
   ridge_ratios: [0.0, 0.00000001, 0.0000001, 0.000001, 0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0]
   target_chunk_size: 256
-  compare_toeplitz: true
-  least_squares:
-    atol: 0.0000000001
-    btol: 0.0000000001
-    conlim: 100000000.0
-    maxiter: 2000
-    normal_residual_tolerance: 0.0000001
-    max_quantization_relative_increase: null
-    control_comparison_relative_tolerance: 0.00000001
 
 prior:
   low_hz: 20.0
