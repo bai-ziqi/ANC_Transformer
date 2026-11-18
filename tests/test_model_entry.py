@@ -53,6 +53,43 @@ def test_default_sfanc_dimensions_and_gradient_flow(model_inputs):
     assert model.filter_head.output[-1].weight.grad is not None
 
 
+def test_waveform_multiquery_model_dimensions_and_parameters(model_inputs):
+    _, bundle = model_inputs
+    cfg = load_config(
+        Path(__file__).resolve().parents[1] / "config.sfanc.waveconv128.yaml"
+    )
+    bundle = copy.deepcopy(bundle)
+    bundle["normalizer"] = None
+    model = ANCTransformer(cfg, bundle).eval()
+    observation = torch.randn(2, 16000)
+    prior = bundle["prior_filters"].float().expand(2, -1)
+    shapes = {}
+
+    def capture(name):
+        def hook(module, inputs, output):
+            shapes[name] = tuple(output.shape)
+        return hook
+
+    hooks = [
+        model.encoder.register_forward_hook(capture("encoder_tokens")),
+        model.decoder.prior_tokenizer.register_forward_hook(capture("prior_tokens")),
+    ]
+    try:
+        prediction = model(observation, prior_filter=prior)
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    assert prediction["filter"].shape == (2, 1024)
+    assert prediction["pooled_context"].shape == (2, 512)
+    assert shapes["encoder_tokens"] == (2, 1000, 128)
+    assert shapes["prior_tokens"] == (2, 32, 128)
+    assert prediction["pool_weights"] is None
+    assert model.filter_head.pool_attention is not None
+    assert model.decoder.prior_tokenizer.projection.out_features == 4096
+    assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 5_994_752
+
+
 def test_short_observation_and_shared_prior_are_supported(model_inputs):
     cfg, bundle = model_inputs
     model = ANCTransformer(cfg, bundle).eval()

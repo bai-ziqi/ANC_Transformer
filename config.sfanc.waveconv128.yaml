@@ -1,0 +1,115 @@
+# SFANC waveform-Conv1D experiment: 16 kHz, PP512, SP256, control FIR1024.
+seed: 2026
+sample_rate: 16000
+primary_length: 512
+secondary_length: 256
+filter_length: 1024
+data_root: /home/zqbai_1/Dataset/Synthesized_Dataset
+manifest_file: results/sfanc_path1_fwls/manifest.json
+targets_dir: wiener/sfanc_path1_fwls_targets
+bank_file: wiener/sfanc_path1_fwls_priors.pt
+output_dir: results/sfanc_path1_waveconv128
+checkpoint_file: checkpoints/sfanc_path1_waveconv128_best.pt
+
+sfanc:
+  split_dirs:
+    train: Training_data
+    validation: Validate_data
+    test: Testing_data
+  expected_counts: {train: 80000, validation: 2000, test: 2000}
+  extensions: [.wav]
+  waveform_key: null
+  pairing: round_robin
+  target_cache_chunks: null
+
+environments:
+  - id: path_1
+    primary_file: /home/zqbai_1/Dataset/Path/path_1/Primary_path.mat
+    secondary_file: /home/zqbai_1/Dataset/Path/path_1/Secondary_path.mat
+    primary_key: null
+    secondary_key: null
+    sample_rate: 16000
+
+protocol:
+  mode: sfanc
+  train_environments: [path_1]
+  validation_environments: [path_1]
+  test_environments: [path_1]
+
+wiener:
+  ridge_ratios: [0.0, 0.00000001, 0.0000001, 0.000001, 0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0]
+  target_chunk_size: 256
+  compare_toeplitz: true
+  least_squares:
+    atol: 0.0000000001
+    btol: 0.0000000001
+    conlim: 100000000.0
+    maxiter: 2000
+    normal_residual_tolerance: 0.0000001
+    max_quantization_relative_increase: null
+    control_comparison_relative_tolerance: 0.00000001
+
+prior:
+  low_hz: 20.0
+  high_hz: 7980.0
+  fit_seconds: 30.0
+  validation_seconds: 10.0
+  warmup_seconds: 0.25
+  filter_order: 6
+  seed: 2026
+
+features:
+  observation_seconds: null
+  input_mode: waveform_conv
+  conv_kernel_size: 80
+  conv_stride: 4
+  conv_causal: true
+  conv_padding: 38
+  conv_pool_kernel_size: 4
+  conv_pool_stride: 4
+  n_fft: 512
+  hop_length: 128
+  frequency_bins: 129
+  normalization_max_clips: 256
+
+dataset:
+  score_mode: full_clip
+
+model:
+  architecture: prior_adaptive
+  prior_mode: sample
+  filter_output_mode: direct
+  prior_tokenizer: linear
+  prior_normalize: false
+  prior_hidden_dim: 256
+  prior_frequency_embedding: true
+  filter_scale_mode: unit
+  prior_tokens: 32
+  rope_base: 10000.0
+  d_model: 128
+  nhead: 4
+  encoder_layers: 2
+  decoder_layers: 2
+  dim_feedforward: 512
+  dropout: 0.1
+  pooling_mode: multi_query_attention
+  pool_queries: 4
+  filter_head_hidden: 512
+  return_pool_weights: false
+
+training:
+  epochs: 40
+  batch_size: 2
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  loss_mode: filter
+  filter_loss_weight: 1.0
+  acoustic_loss_weight: 0.0
+  num_workers: 0
+  device: auto
+  allow_partial: false
+
+metrics:
+  n_fft: 2048
+  hop_length: 512

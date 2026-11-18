@@ -51,10 +51,13 @@ class RoPESelfAttention(nn.Module):
         query, key, value = qkv.permute(2, 0, 3, 1, 4).unbind(0)
         query = apply_rope(query, self.rope_base)
         key = apply_rope(key, self.rope_base)
-        scores = query @ key.transpose(-2, -1) / math.sqrt(self.head_dim)
-        weights = F.softmax(scores, dim=-1)
-        weights = F.dropout(weights, p=self.attention_dropout, training=self.training)
-        attended = weights @ value
+        attended = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+            is_causal=False,
+        )
         attended = attended.transpose(1, 2).reshape(batch, length, width)
         return self.dropout(self.output(attended))
 

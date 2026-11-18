@@ -24,8 +24,12 @@ _SPLITS = ("train", "validation", "test")
 def _observation_samples(cfg, frames):
     seconds = cfg["features"].get("observation_seconds")
     samples = frames if seconds is None else round(seconds * cfg["sample_rate"])
-    if not cfg["features"]["n_fft"] <= samples <= frames:
-        raise ValueError("Observation must fit the clip and cover the feature FFT.")
+    if cfg["features"].get("input_mode", "log_spectrum") == "waveform_conv":
+        minimum = cfg["features"]["conv_kernel_size"]
+    else:
+        minimum = cfg["features"]["n_fft"]
+    if not minimum <= samples <= frames:
+        raise ValueError("Observation must fit the clip and cover the configured frontend.")
     return samples
 
 
@@ -130,6 +134,8 @@ def load_noise(record, cfg):
 
 def fit_sfanc_normalizer(cfg, manifest):
     """Fit log-spectrum normalization on TRAIN noise only, deduplicated by clip."""
+    if cfg["features"].get("input_mode", "log_spectrum") == "waveform_conv":
+        return None
     unique = {record["sample_id"]: record for record in manifest["records"] if record["split"] == "train"}
     records = list(unique.values())
     maximum = int(cfg["features"].get("normalization_max_clips", 256))

@@ -40,6 +40,12 @@ class ANCTransformer(nn.Module):
             self.filter_length,
             cfg["model"].get("filter_output_mode", "direct"),
             cfg["model"].get("filter_scale_mode", "prior_rms"),
+            pooling_mode=cfg["model"].get("pooling_mode", "single_linear"),
+            num_queries=cfg["model"].get("pool_queries", 1),
+            num_heads=cfg["model"]["nhead"],
+            hidden_dim=cfg["model"].get("filter_head_hidden", cfg["model"]["d_model"]),
+            dropout=cfg["model"]["dropout"],
+            return_pool_weights=cfg["model"].get("return_pool_weights", False),
         )
 
     def forward(self, reference_observation, prior_filter=None):

@@ -17,8 +17,11 @@ def inspect_model(cfg, samples=None, batch_size=2, device="cpu"):
     if samples is None:
         seconds = cfg["features"].get("observation_seconds")
         samples = round((1.0 if seconds is None else seconds) * cfg["sample_rate"])
-    if not isinstance(samples, int) or samples < cfg["features"]["n_fft"]:
-        raise ValueError("samples must cover at least the feature FFT.")
+    input_mode = cfg["features"].get("input_mode", "log_spectrum")
+    minimum_samples = (cfg["features"]["conv_kernel_size"]
+                       if input_mode == "waveform_conv" else cfg["features"]["n_fft"])
+    if not isinstance(samples, int) or samples < minimum_samples:
+        raise ValueError("samples must cover the configured input frontend.")
     if not isinstance(batch_size, int) or batch_size <= 0:
         raise ValueError("batch_size must be positive.")
     seed_everything(cfg["seed"])
@@ -31,7 +34,8 @@ def inspect_model(cfg, samples=None, batch_size=2, device="cpu"):
         "primary_length": cfg["primary_length"], "secondary_length": cfg["secondary_length"],
         "environment_ids": ["shape_check_only"], "primary_paths": primary,
         "secondary_paths": secondary, "prior_filters": torch.zeros(1, taps),
-        "normalizer": {"mean": torch.zeros(bins), "std": torch.ones(bins)},
+        "normalizer": (None if input_mode == "waveform_conv"
+                       else {"mean": torch.zeros(bins), "std": torch.ones(bins)}),
     }
     model = ANCTransformer(cfg, bundle).to(device_for(device)).eval()
     observation = torch.randn(batch_size, samples)
@@ -45,6 +49,10 @@ def inspect_model(cfg, samples=None, batch_size=2, device="cpu"):
 
     hooks = [model.encoder.register_forward_hook(capture("encoder_tokens_shape")),
              model.decoder.prior_tokenizer.register_forward_hook(capture("prior_tokens_shape"))]
+    if model.filter_head.pool_attention is not None:
+        def capture_pooled(module, inputs, output):
+            shapes["pooled_queries_shape"] = list(output[0].shape)
+        hooks.append(model.filter_head.pool_attention.register_forward_hook(capture_pooled))
     try:
         with torch.no_grad():
             output = model(observation, prior_filter=prior)["filter"]
@@ -55,6 +63,8 @@ def inspect_model(cfg, samples=None, batch_size=2, device="cpu"):
         raise RuntimeError("Model entry produced an invalid FIR output.")
     return {
         "data_kind": "synthetic shape check only; not trained or acoustically calibrated",
+        "input_mode": input_mode,
+        "pooling_mode": cfg["model"].get("pooling_mode", "single_linear"),
         "sample_rate": cfg["sample_rate"], "primary_length": cfg["primary_length"],
         "secondary_length": cfg["secondary_length"], "filter_length": taps,
         "primary_path_shape": list(primary.shape), "secondary_path_shape": list(secondary.shape),

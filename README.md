@@ -11,8 +11,8 @@
 ## 数据与模型
 
 ```text
-WAV x ── LogSpectrum ── RoPE Encoder ── observation query
-独立环境 w_prior ── prior tokenizer ── cross attention ── Filter Head ── w_hat
+WAV x ── LogSpectrum 或因果 Conv1D ── RoPE Encoder ── observation tokens
+独立环境 w_prior ── prior tokenizer ── cross attention ── 全局多查询池化 ── Filter Head ── w_hat
 
 离线标签：d=P*x，z=S*x；用完整片段纯有限窗口最小二乘求解 w_target
 训练损失：归一化 FIR 误差；评估残差：e=d-S*(w_hat*x)
@@ -29,6 +29,7 @@ PP/SP 只用于标签构造与声学仿真，不作为额外网络输入。
 ```bash
 python -m pip install -r requirements.txt
 python -m models.inspect_model --config config.sfanc.yaml
+python -m models.inspect_model --config config.sfanc.waveconv128.yaml
 python -m data.sfanc --config config.sfanc.smoke.yaml --limit 8
 python -m wiener.build_priors --config config.sfanc.smoke.yaml
 python -m wiener.build_targets --config config.sfanc.smoke.yaml --limit 8 --resume
@@ -38,6 +39,8 @@ python -m wiener.diagnose_labels --config config.sfanc.smoke.yaml --count 2
 ```
 
 正式运行将配置换成 `config.sfanc.yaml` 并移除 `--limit`。
+波形 Conv1D 实验使用 `config.sfanc.waveconv128.yaml`；它复用同一组先验和标签，
+但不兼容旧的 64 维频谱模型 checkpoint。
 最终确定模型和参数后才运行 `--split test`；测试结果不参与 epoch 选择。
 详细数据要求、服务器路径、最小二乘标签求解与缓存续算见 [SFANC_WIENER_WORKFLOW.md](SFANC_WIENER_WORKFLOW.md)。
 
@@ -46,6 +49,7 @@ python -m wiener.diagnose_labels --config config.sfanc.smoke.yaml --count 2
 ```text
 ANC_Transformer/
 ├── config.sfanc.yaml              # 正式实验：数据、路径、先验、模型及训练参数。
+├── config.sfanc.waveconv128.yaml  # 波形 Conv1D、128 维、四查询池化实验。
 ├── config.sfanc.smoke.yaml        # 少量样本检查，使用独立输出位置。
 ├── utils.py                      # 配置解析、随机种子、设备与文件签名。
 ├── requirements.txt              # 项目依赖与版本范围。
@@ -66,9 +70,9 @@ ANC_Transformer/
 │   └── diagnose_labels.py        # 只读比较缓存标签、先验和有限窗口候选/精确解。
 ├── models/
 │   ├── anc_transformer.py        # 组装网络并校验波形、先验及输出尺寸。
-│   ├── encoder.py                # 编码噪声时频特征并形成查询。
+│   ├── encoder.py                # 编码噪声频谱或因果波形卷积 token。
 │   ├── decoder.py                # 将先验编码为 token 并与噪声交叉注意力融合。
-│   ├── filter_head.py            # 将融合特征回归为完整 FIR。
+│   ├── filter_head.py            # 全局池化融合特征并回归完整 FIR。
 │   ├── rope.py                   # 提供作用于 Q/K 的旋转位置编码与注意力。
 │   └── inspect_model.py          # 用模拟张量检查网络结构、形状和参数量。
 ├── anc/

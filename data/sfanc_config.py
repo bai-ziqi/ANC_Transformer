@@ -39,6 +39,26 @@ def validate_sfanc_config(cfg, base):
     obs = features.get("observation_seconds")
     if obs is not None and (not np.isfinite(obs) or obs <= 0):
         raise ValueError("observation_seconds must be positive or null (whole clip).")
+    input_mode = features.get("input_mode", "log_spectrum")
+    if input_mode not in ("log_spectrum", "waveform_conv"):
+        raise ValueError("features.input_mode must be log_spectrum or waveform_conv.")
+    if input_mode == "waveform_conv":
+        waveform_defaults = {
+            "conv_causal": True,
+            "conv_kernel_size": 80,
+            "conv_stride": 4,
+            "conv_padding": 38,
+            "conv_pool_kernel_size": 4,
+            "conv_pool_stride": 4,
+        }
+        for key, value in waveform_defaults.items():
+            features.setdefault(key, value)
+        for key in ("conv_kernel_size", "conv_stride", "conv_padding",
+                    "conv_pool_kernel_size", "conv_pool_stride"):
+            if not isinstance(features[key], int) or features[key] <= 0:
+                raise ValueError(f"features.{key} must be a positive integer.")
+        if not isinstance(features["conv_causal"], bool):
+            raise ValueError("features.conv_causal must be boolean.")
     for key in ("n_fft", "hop_length", "frequency_bins", "normalization_max_clips"):
         if not isinstance(features.get(key), int) or features[key] <= 0:
             raise ValueError(f"features.{key} must be a positive integer.")
@@ -51,17 +71,30 @@ def validate_sfanc_config(cfg, base):
                 "prior_frequency_embedding": True, "filter_output_mode": "direct", "filter_scale_mode": "unit"}
     for key, value in defaults.items():
         model.setdefault(key, value)
-    for key in ("d_model", "nhead", "encoder_layers", "decoder_layers", "dim_feedforward", "prior_tokens", "prior_hidden_dim"):
+    for key in ("d_model", "nhead", "encoder_layers", "decoder_layers", "dim_feedforward",
+                "prior_tokens", "prior_hidden_dim"):
         if not isinstance(model.get(key), int) or model[key] <= 0:
+            raise ValueError(f"model.{key} must be a positive integer.")
+    pooling_mode = model.get("pooling_mode", "single_linear")
+    pool_queries = model.get("pool_queries", 1)
+    filter_head_hidden = model.get("filter_head_hidden", model["d_model"])
+    return_pool_weights = model.get("return_pool_weights", False)
+    for key, value in (("pool_queries", pool_queries),
+                       ("filter_head_hidden", filter_head_hidden)):
+        if not isinstance(value, int) or value <= 0:
             raise ValueError(f"model.{key} must be a positive integer.")
     if model["d_model"] % model["nhead"] or (model["d_model"] // model["nhead"]) % 2:
         raise ValueError("RoPE requires d_model divisible by nhead and an even head width.")
     if model["prior_tokenizer"] not in ("linear", "mlp", "fft_pool"):
         raise ValueError("Unknown prior_tokenizer.")
+    if pooling_mode not in ("single_linear", "multi_query_attention"):
+        raise ValueError("Unknown model.pooling_mode.")
     if model["filter_output_mode"] not in ("direct", "residual") or model["filter_scale_mode"] not in ("unit", "prior_rms"):
         raise ValueError("Unknown filter output or scale mode.")
-    if not isinstance(model["prior_normalize"], bool) or not isinstance(model["prior_frequency_embedding"], bool):
-        raise ValueError("Prior normalization/embedding options must be boolean.")
+    if (not isinstance(model["prior_normalize"], bool)
+            or not isinstance(model["prior_frequency_embedding"], bool)
+            or not isinstance(return_pool_weights, bool)):
+        raise ValueError("Boolean model options must be boolean.")
     if not 0 <= model["dropout"] < 1 or model.get("rope_base", 0) <= 1:
         raise ValueError("Invalid dropout or RoPE base.")
     ridges = cfg["wiener"].get("ridge_ratios", [])
