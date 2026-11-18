@@ -14,13 +14,15 @@
 WAV x ── LogSpectrum 或因果 Conv1D ── RoPE Encoder ── observation tokens
 独立环境 w_prior ── prior tokenizer ── cross attention ── 全局多查询池化 ── Filter Head ── w_hat
 
-离线标签：d=P*x，z=S*x；用完整片段纯有限窗口最小二乘求解 w_target
+离线标签：d=P*x，z=S*x；配置可通过 target_cache_mode 选择 Toeplitz 缓存或纯有限窗口最小二乘缓存
 训练损失：归一化 FIR 误差；评估残差：e=d-S*(w_hat*x)
 ```
 
 PP/SP 只用于标签构造与声学仿真，不作为额外网络输入。
 默认 1 秒输入形状为 `[B,16000]`，先验和输出均为 `[B,1024]`。
-逐样本标签是正则化候选网格中实际残差 MSE 最小的解，不宣称精确有限窗口全局最优。
+Toeplitz 缓存中的逐样本标签是正则化候选网格中实际残差 MSE 最小的解；
+纯最小二乘缓存则使用完整片段有限窗口 LSMR。当前波形 Conv1D 结构实验复用已经生成的
+Toeplitz 标签，以单独检验模型结构变化。
 
 ## 运行
 
